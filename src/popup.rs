@@ -86,6 +86,8 @@ pub fn toggle(p: &Popup, ui: &AppWindow) {
         return;
     }
     mirror(p, ui);
+    // The window may have been hidden for hours: read the lamp now, and every few seconds while open
+    crate::refresh_shown_state();
     place(p);
     let _ = p.show();
     place(p);
@@ -94,9 +96,14 @@ pub fn toggle(p: &Popup, ui: &AppWindow) {
     }
     AWAY_TICKS.with(|a| a.set(0));
     let (pw, uw) = (p.as_weak(), ui.as_weak());
+    let ticks = Cell::new(0u32);
     TIMER.with(|t| {
         t.start(TimerMode::Repeated, Duration::from_millis(150), move || {
             let (Some(p), Some(ui)) = (pw.upgrade(), uw.upgrade()) else { return };
+            ticks.set(ticks.get() + 1);
+            if ticks.get() % 20 == 0 {
+                crate::refresh_shown_state();
+            }
             mirror(&p, &ui);
             // Hide once focus has been elsewhere for two ticks
             let fg = unsafe { GetForegroundWindow() };

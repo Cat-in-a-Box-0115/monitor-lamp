@@ -20,15 +20,17 @@ $programs = [Environment]::GetFolderPath('Programs')
 $shortcut = Join-Path $programs 'Detent.lnk'
 $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 
-Get-Process 'Detent', 'detent', 'Monitor Lamp', 'monitor-lamp' -ErrorAction SilentlyContinue | Stop-Process -Force
-Start-Sleep -Milliseconds 500
-
-# Monitor Lamp, the earlier name
-Remove-Item (Join-Path $env:LOCALAPPDATA 'Programs\Monitor Lamp') -Recurse -Force -ErrorAction SilentlyContinue
-Remove-Item (Join-Path $programs 'Monitor Lamp.lnk') -Force -ErrorAction SilentlyContinue
-Remove-ItemProperty $runKey 'Monitor Lamp' -ErrorAction SilentlyContinue
+# Monitor Lamp, the earlier name: removed only once Detent is in place
+function Remove-MonitorLamp {
+    Remove-Item (Join-Path $env:LOCALAPPDATA 'Programs\Monitor Lamp') -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item (Join-Path $programs 'Monitor Lamp.lnk') -Force -ErrorAction SilentlyContinue
+    Remove-ItemProperty $runKey 'Monitor Lamp' -ErrorAction SilentlyContinue
+}
 
 if ($Uninstall) {
+    Get-Process 'Detent', 'detent', 'Monitor Lamp', 'monitor-lamp' -ErrorAction SilentlyContinue | Stop-Process -Force
+    Start-Sleep -Milliseconds 500
+    Remove-MonitorLamp
     Remove-Item $dest -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item $shortcut -Force -ErrorAction SilentlyContinue
     Remove-ItemProperty $runKey 'Detent' -ErrorAction SilentlyContinue
@@ -36,11 +38,18 @@ if ($Uninstall) {
     return
 }
 
-if (-not (Test-Path $src)) { throw "Build first: cargo build --release" }
-# Clear out any earlier install
+# Check the build before touching anything that works today
+if (-not (Test-Path $src)) { throw "Build first: cargo build --release (nothing was changed)" }
+
+Get-Process 'Detent', 'detent', 'Monitor Lamp', 'monitor-lamp' -ErrorAction SilentlyContinue | Stop-Process -Force
+Start-Sleep -Milliseconds 500
+
+# Clear out any earlier install of Detent, then copy the new exe; stop here (Monitor Lamp untouched) if it fails
 if (Test-Path $dest) { Remove-Item (Join-Path $dest '*') -Recurse -Force }
 New-Item -ItemType Directory -Force $dest | Out-Null
 Copy-Item $src $exe -Force
+if (-not (Test-Path $exe)) { throw "Couldn't copy to $exe; Monitor Lamp was left in place" }
+Remove-MonitorLamp
 
 $lnk = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcut)
 $lnk.TargetPath = $exe

@@ -35,7 +35,7 @@ Each message is `type u8 · len u16 LE · payload[len]`, COBS-encoded and follow
 | 0x14 | PC_STATS | app → knob | `cpu_pct opt8, cpu_c opt8, gpu_pct opt8, gpu_c opt8, ram_pct opt8, host str[23]` |
 | 0x20 | PROVISION | app → knob | `ssid str[32], pass str[64], lamp_ip str[15], lamp_token str[32]` (token as 32 hex chars) |
 | 0x21 | TIME | app → knob | `unix u32, tz_min i16` (minutes east of UTC) |
-| 0x30 | LAMP_STATE | knob → app | `power u8, bright u8 (1–100), ct u16 (K), bg_power u8, bg_rgb u32 (0xRRGGBB)` |
+| 0x30 | LAMP_STATE | knob → app | `changed u8, power u8, bright u8 (1–100), ct u16 (K), bg_power u8, bg_rgb u32 (0xRRGGBB)`. `changed` bits: 1 power, 2 brightness, 4 warmth, 8 backlight power, 16 backlight colour |
 | 0x31 | LOG | knob → app | `text str[200]` |
 
 ## Rules
@@ -44,7 +44,8 @@ Each message is `type u8 · len u16 LE · payload[len]`, COBS-encoded and follow
   - Both sides send HELLO.
   - The app then sends a full snapshot: TIME, NOW_PLAYING, the COVER (if there is one), LYRICS or LYRICS_NONE, and
     PC_STATS.
-  - After a reconnect, the app sends everything again.
+  - After a reconnect, the app sends everything again. When nothing is playing, the snapshot still includes an empty,
+    stopped NOW_PLAYING so the knob clears an old song.
 - **COVER:**
   - Sent only when `art_id` changes (and in the snapshot).
   - The knob shows a cover only once all `chunks` chunks for one `art_id` have arrived. A new `art_id` throws away
@@ -58,7 +59,8 @@ Each message is `type u8 · len u16 LE · payload[len]`, COBS-encoded and follow
     the same.
 - **PC_STATS:** sent every 2 s.
 - **LAMP_STATE:**
-  - The knob sends it after each command it sends to the lamp (over Wi-Fi, miIO).
+  - The knob sends it after each command it sends to the lamp (over Wi-Fi, miIO), with `changed` naming what that
+    command set and the other fields holding the full state.
   - Detent treats it as a manual change: a brightness or warmth change pauses time of day, and a backlight change
     stops screen sync and colour flows.
 - **PROVISION:**

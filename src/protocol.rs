@@ -7,6 +7,13 @@ pub const VID: u16 = 0x303A;
 pub const PID: u16 = 0x8D01;
 pub const PROTO_VER: u8 = 1;
 
+/// LAMP_STATE `changed` bits: which values the knob just changed
+pub const CHANGED_POWER: u8 = 1;
+pub const CHANGED_BRIGHT: u8 = 2;
+pub const CHANGED_CT: u8 = 4;
+pub const CHANGED_BG_POWER: u8 = 8;
+pub const CHANGED_BG_RGB: u8 = 16;
+
 /// Bytes per COVER chunk
 pub const COVER_CHUNK: usize = 1024;
 
@@ -44,8 +51,8 @@ pub enum Msg {
     Provision { ssid: String, pass: String, lamp_ip: String, lamp_token: String },
     /// 0x21
     Time { unix: u32, tz_min: i16 },
-    /// 0x30, knob -> app
-    LampState { power: bool, bright: u8, ct: u16, bg_power: bool, bg_rgb: u32 },
+    /// 0x30, knob -> app. `changed`: CHANGED_* bits for what the knob just set; the rest is the full state
+    LampState { changed: u8, power: bool, bright: u8, ct: u16, bg_power: bool, bg_rgb: u32 },
     /// 0x31, knob -> app
     Log(String),
 }
@@ -103,7 +110,8 @@ pub fn encode(m: &Msg) -> Vec<u8> {
             w.u16(*tz_min as u16);
             0x21
         }
-        Msg::LampState { power, bright, ct, bg_power, bg_rgb } => {
+        Msg::LampState { changed, power, bright, ct, bg_power, bg_rgb } => {
+            w.u8(*changed);
             w.u8(*power as u8);
             w.u8(*bright);
             w.u16(*ct);
@@ -152,7 +160,7 @@ fn decode(raw: &[u8]) -> Option<Msg> {
         }
         0x20 => Msg::Provision { ssid: r.str()?, pass: r.str()?, lamp_ip: r.str()?, lamp_token: r.str()? },
         0x21 => Msg::Time { unix: r.u32()?, tz_min: r.u16()? as i16 },
-        0x30 => Msg::LampState { power: r.u8()? != 0, bright: r.u8()?, ct: r.u16()?, bg_power: r.u8()? != 0, bg_rgb: r.u32()? },
+        0x30 => Msg::LampState { changed: r.u8()?, power: r.u8()? != 0, bright: r.u8()?, ct: r.u16()?, bg_power: r.u8()? != 0, bg_rgb: r.u32()? },
         0x31 => Msg::Log(r.str()?),
         _ => return None,
     };
@@ -323,7 +331,7 @@ mod tests {
             Msg::PcStats { cpu_pct: Some(12), cpu_c: None, gpu_pct: Some(3), gpu_c: Some(61), ram_pct: Some(48), host: "DESK".into() },
             Msg::Provision { ssid: "home".into(), pass: "pa ss".into(), lamp_ip: "10.0.0.16".into(), lamp_token: "00112233445566778899aabbccddeeff".into() },
             Msg::Time { unix: 1_794_758_659, tz_min: -480 },
-            Msg::LampState { power: true, bright: 70, ct: 4000, bg_power: false, bg_rgb: 0xFFB340 },
+            Msg::LampState { changed: CHANGED_BRIGHT | CHANGED_CT, power: true, bright: 70, ct: 4000, bg_power: false, bg_rgb: 0xFFB340 },
             Msg::Log("hello from the knob".into()),
         ]
     }

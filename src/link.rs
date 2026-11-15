@@ -15,9 +15,14 @@ pub struct Snapshot {
     pub stats: Option<Msg>,
 }
 
+/// "Nothing playing", sent explicitly so the knob clears an old song
+pub fn nothing_playing() -> Msg {
+    Msg::NowPlaying { playing: false, pos_ms: 0, dur_ms: 0, title: String::new(), artist: String::new() }
+}
+
 impl Default for Snapshot {
     fn default() -> Self {
-        Snapshot { time: None, now: None, cover: None, lyrics: Msg::LyricsNone, stats: None }
+        Snapshot { time: None, now: Some(nothing_playing()), cover: None, lyrics: Msg::LyricsNone, stats: None }
     }
 }
 
@@ -90,6 +95,7 @@ impl<T: Read + Write> Session<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::CHANGED_BRIGHT;
     use std::collections::VecDeque;
 
     /// A fake knob: bytes the "knob" sends wait in `inp`; what the app writes lands in `out`
@@ -153,11 +159,13 @@ mod tests {
         assert!(matches!(got[5], Msg::PcStats { .. }));
         assert_eq!(got.len(), 6);
 
-        // An empty snapshot still tells the knob there are no lyrics
+        // An empty snapshot still tells the knob nothing is playing and there are no lyrics, so a knob
+        // that kept an old song on screen across a reconnect clears it
         let s = Session::new(Pipe::default(), &Snapshot::default()).unwrap();
         let got = sent(&s.io);
-        assert_eq!(got.len(), 2);
-        assert_eq!(got[1], Msg::LyricsNone);
+        assert_eq!(got.len(), 3);
+        assert_eq!(got[1], Msg::NowPlaying { playing: false, pos_ms: 0, dur_ms: 0, title: String::new(), artist: String::new() });
+        assert_eq!(got[2], Msg::LyricsNone);
     }
 
     #[test]
@@ -183,9 +191,9 @@ mod tests {
 
     #[test]
     fn fake_knob_frames_match() {
-        // tools/fake_knob.py's LAMP_STATE frame for (power 1, bright 50, ct 4000, bg off, rgb 0)
-        let st = Msg::LampState { power: true, bright: 50, ct: 4000, bg_power: false, bg_rgb: 0 };
-        assert_eq!(hex(&encode(&st)), "033009050132a00f010101010100");
+        // tools/fake_knob.py's LAMP_STATE frame for (changed bright, power 1, bright 50, ct 4000, bg off, rgb 0)
+        let st = Msg::LampState { changed: CHANGED_BRIGHT, power: true, bright: 50, ct: 4000, bg_power: false, bg_rgb: 0 };
+        assert_eq!(hex(&encode(&st)), "03300a06020132a00f010101010100");
     }
 
     fn hex(b: &[u8]) -> String {
@@ -196,7 +204,7 @@ mod tests {
     fn poll_returns_lamp_state() {
         let mut s = Session::new(Pipe::default(), &Snapshot::default()).unwrap();
         assert_eq!(s.poll().unwrap(), vec![]);
-        let st = Msg::LampState { power: true, bright: 40, ct: 3500, bg_power: false, bg_rgb: 0 };
+        let st = Msg::LampState { changed: CHANGED_BRIGHT, power: true, bright: 40, ct: 3500, bg_power: false, bg_rgb: 0 };
         let f = encode(&st);
         s.io.inp.extend(&f[..3]);
         assert_eq!(s.poll().unwrap(), vec![]);

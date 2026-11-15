@@ -83,7 +83,7 @@ def main():
                 print("bad frame:", e)
         if time.time() > next_state:
             bright = 30 if bright >= 90 else bright + 20
-            port.write(frame(0x30, struct.pack("<BBHBI", 1, bright, 4000, 0, 0)))
+            port.write(frame(0x30, struct.pack("<BBBHBI", 0x02, 1, bright, 4000, 0, 0)))  # changed = brightness
             print(f"-> LAMP_STATE bright {bright}%")
             next_state = time.time() + 5
 

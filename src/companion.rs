@@ -5,24 +5,25 @@ use crate::knob::{self, Out};
 use crate::media::{self, Media, ART_KNOB};
 use crate::stats::Sampler;
 use crate::winutil::log;
-use detent::link::Snapshot;
-use detent::lrc::Lrc;
-use detent::lyrics::{self, Found};
+use detent::link::{nothing_playing, Snapshot};
+use detent::lyrics::{self, Found, TrackKey, Tracker};
 use detent::protocol::Msg;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+/// What's playing and its lyrics, under one lock so a lyric line always belongs to the media it's read with
+struct Playing {
+    media: Option<Media>,
+    lyrics: Tracker,
+}
+
 struct Companion {
     snap: Arc<Mutex<Snapshot>>,
     tx: Sender<Out>,
-    media: Mutex<Option<Media>>,
-    /// Lyrics for the current track; the generation tells a stale fetch from a current one
-    lrc: Mutex<Option<Lrc>>,
-    generation: AtomicU64,
-    last_line: Mutex<Option<u32>>,
+    playing: Mutex<Playing>,
     connected: AtomicBool,
 }
 
@@ -50,18 +51,49 @@ fn set_lyrics(m: Msg) {
     send(m);
 }
 
+fn key_of(m: &Option<Media>) -> Option<TrackKey> {
+    m.as_ref().map(|m| TrackKey { title: m.title.clone(), artist: m.artist.clone(), dur_s: (m.dur_ms + 500) / 1000 })
+}
+
+/// Starts a lyrics lookup for generation `generation` on its own thread; never blocks the caller
+fn fetch_lyrics(generation: u64, key: TrackKey) {
+    thread::spawn(move || {
+        let dir = detent::settings::dir().join("lyrics");
+        let found = match lyrics::get(&dir, &key.title, &key.artist, key.dur_s) {
+            Ok(Found::Synced(l)) => Ok(Some(l)),
+            Ok(Found::None) => Ok(None),
+            Err(e) => {
+                log(&format!("lyrics: {e}"));
+                Err(())
+            }
+        };
+        // Installed only if the track hasn't changed meanwhile (checked under the same lock)
+        c().playing.lock().unwrap().lyrics.install(generation, found, Instant::now());
+    });
+}
+
+/// Asks the tracker whether lyrics need clearing or fetching for what's playing now
+fn check_lyrics() {
+    let co = c();
+    let (change, key) = {
+        let mut p = co.playing.lock().unwrap();
+        let key = key_of(&p.media);
+        (p.lyrics.track(key.clone(), Instant::now()), key)
+    };
+    if change.new_track {
+        set_lyrics(Msg::LyricsNone);
+    }
+    if let (Some(g), Some(k)) = (change.fetch, key) {
+        fetch_lyrics(g, k);
+    }
+}
+
 fn on_media(m: Option<Media>, show: &(dyn Fn(Option<Media>) + Send + Sync)) {
     let co = c();
-    let prev = co.media.lock().unwrap().clone();
-    let new_track = match (&prev, &m) {
-        (Some(p), Some(n)) => p.title != n.title || p.artist != n.artist,
-        (None, None) => false,
-        _ => true,
-    };
-    *co.media.lock().unwrap() = m.clone();
+    co.playing.lock().unwrap().media = m.clone();
     {
         let mut s = co.snap.lock().unwrap();
-        s.now = m.as_ref().map(now_playing);
+        s.now = Some(m.as_ref().map(now_playing).unwrap_or_else(nothing_playing));
         s.cover = m.as_ref().and_then(|m| Some((m.art_id, ART_KNOB as u16, ART_KNOB as u16, m.art_rgb565.clone()?)));
     }
     match &m {
@@ -71,29 +103,9 @@ fn on_media(m: Option<Media>, show: &(dyn Fn(Option<Media>) + Send + Sync)) {
                 let _ = co.tx.send(Out::Cover(m.art_id, ART_KNOB as u16, ART_KNOB as u16, px.clone()));
             }
         }
-        None => send(Msg::NowPlaying { playing: false, pos_ms: 0, dur_ms: 0, title: String::new(), artist: String::new() }),
+        None => send(nothing_playing()),
     }
-
-    if new_track {
-        let generation = co.generation.fetch_add(1, Ordering::SeqCst) + 1;
-        *co.lrc.lock().unwrap() = None;
-        *co.last_line.lock().unwrap() = None;
-        set_lyrics(Msg::LyricsNone);
-        if let Some(m) = m.clone() {
-            thread::spawn(move || {
-                let dir = detent::settings::dir().join("lyrics");
-                let found = lyrics::get(&dir, &m.title, &m.artist, (m.dur_ms + 500) / 1000);
-                if c().generation.load(Ordering::SeqCst) != generation {
-                    return; // the track changed meanwhile
-                }
-                match found {
-                    Ok(Found::Synced(l)) => *c().lrc.lock().unwrap() = Some(l),
-                    Ok(Found::None) => {}
-                    Err(e) => log(&format!("lyrics: {e}")),
-                }
-            });
-        }
-    }
+    check_lyrics();
     show(m);
 }
 
@@ -108,21 +120,15 @@ fn ticker() {
             thread::sleep(Duration::from_millis(200));
             tick += 1;
             let co = c();
-            let media = co.media.lock().unwrap().clone();
-
+            let (media, line) = {
+                let mut p = co.playing.lock().unwrap();
+                let line = p.media.as_ref().map(|m| m.pos_now()).and_then(|pos| p.lyrics.line(pos));
+                (p.media.clone(), line)
+            };
+            if let Some(l) = line {
+                set_lyrics(l);
+            }
             if let Some(m) = &media {
-                let line = co.lrc.lock().unwrap().as_ref().and_then(|l| {
-                    let (id, p, cur, n) = l.at(m.pos_now())?;
-                    Some(Msg::Lyrics { line_id: id, prev: p.into(), cur: cur.into(), next: n.into() })
-                });
-                if let Some(Msg::Lyrics { line_id, .. }) = &line {
-                    let mut last = co.last_line.lock().unwrap();
-                    if *last != Some(*line_id) {
-                        *last = Some(*line_id);
-                        drop(last);
-                        set_lyrics(line.unwrap());
-                    }
-                }
                 if m.playing && last_np.elapsed() >= Duration::from_secs(5) {
                     last_np = Instant::now();
                     let np = now_playing(m);
@@ -132,6 +138,8 @@ fn ticker() {
             }
             if tick % 5 == 0 {
                 co.snap.lock().unwrap().time = Some(time_msg());
+                // retries a failed lyrics lookup once it's due
+                check_lyrics();
             }
             if tick % 10 == 0 {
                 let st = sampler.sample();
@@ -166,10 +174,7 @@ pub fn start(
     let _ = C.set(Companion {
         snap,
         tx,
-        media: Mutex::new(None),
-        lrc: Mutex::new(None),
-        generation: AtomicU64::new(0),
-        last_line: Mutex::new(None),
+        playing: Mutex::new(Playing { media: None, lyrics: Tracker::default() }),
         connected: AtomicBool::new(false),
     });
     media::start(move |m| on_media(m, &show_media));

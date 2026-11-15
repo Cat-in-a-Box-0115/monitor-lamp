@@ -67,8 +67,6 @@ struct App {
     send_bg_bright: Arc<Latest<u32>>,
     send_bg_rgb: Arc<Latest<u32>>,
     dry_run: bool,
-    /// The knob's last LAMP_STATE: (power, bright, ct, bg_power, bg_rgb)
-    knob_last: Mutex<Option<(bool, u8, u16, bool, u32)>>,
 }
 
 static APP: OnceLock<App> = OnceLock::new();
@@ -160,6 +158,14 @@ fn refresh_state() -> Option<State> {
         update_settings(true, |st| st.user_brightness = Some(s.bright));
     }
     Some(s)
+}
+
+/// Reads the lamp for the window and popup, unless screen sync or a flow is streaming to it
+pub(crate) fn refresh_shown_state() {
+    let a = app();
+    if !a.sync.running() && !a.lamp.streaming() {
+        poll_state();
+    }
 }
 
 /// Reads the lamp and shows it, unless the user changed something meanwhile
@@ -302,9 +308,20 @@ fn show_lamp_state(s: Option<State>) {
 
 fn on_knob(m: detent::protocol::Msg) {
     use detent::protocol::Msg;
+    // One worker handles the knob's lamp reports in arrival order
+    static LAMP_TX: OnceLock<Mutex<std::sync::mpsc::Sender<KnobLamp>>> = OnceLock::new();
     match m {
-        Msg::LampState { power, bright, ct, bg_power, bg_rgb } => {
-            thread::spawn(move || on_knob_lamp((power, bright, ct, bg_power, bg_rgb)));
+        Msg::LampState { changed, power, bright, ct, bg_power, bg_rgb } => {
+            let tx = LAMP_TX.get_or_init(|| {
+                let (tx, rx) = std::sync::mpsc::channel::<KnobLamp>();
+                thread::spawn(move || {
+                    for r in rx {
+                        on_knob_lamp(r);
+                    }
+                });
+                Mutex::new(tx)
+            });
+            let _ = tx.lock().unwrap().send(KnobLamp { changed, power, bright, ct, bg_power, bg_rgb });
         }
         Msg::Hello { version, proto, .. } => log(&format!("knob: firmware {version}, protocol {proto}")),
         Msg::Log(text) => log(&format!("knob says: {text}")),
@@ -312,28 +329,35 @@ fn on_knob(m: detent::protocol::Msg) {
     }
 }
 
-/// The knob changed the lamp itself (over Wi-Fi). Treated like a change made in the app:
-/// brightness becomes the user's brightness, a brightness or warmth change hands control back from
-/// time of day, and a backlight change stops screen sync and colour flows.
-fn on_knob_lamp(new: (bool, u8, u16, bool, u32)) {
+struct KnobLamp {
+    changed: u8,
+    power: bool,
+    bright: u8,
+    ct: u16,
+    bg_power: bool,
+    bg_rgb: u32,
+}
+
+/// The knob changed the lamp itself (over Wi-Fi), and says what it changed. Treated like a change made in
+/// the app: brightness becomes the user's brightness, a brightness or warmth change hands control back
+/// from time of day, and a backlight change stops screen sync and colour flows.
+fn on_knob_lamp(r: KnobLamp) {
+    use detent::protocol::{CHANGED_BG_POWER, CHANGED_BG_RGB, CHANGED_BRIGHT, CHANGED_CT};
     let a = app();
     touched();
-    let prev = a.knob_last.lock().unwrap().replace(new).or_else(|| {
-        let s = a.lamp.state().ok()?;
-        Some((s.power, s.bright as u8, s.ct as u16, s.bg_power, s.bg_rgb))
-    });
-    let (power, bright, ct, bg_power, bg_rgb) = new;
-    let changed = |f: fn(&(bool, u8, u16, bool, u32)) -> u32| prev.as_ref().map_or(true, |p| f(p) != f(&new));
-    let main_changed = changed(|s| s.1 as u32) || changed(|s| s.2 as u32);
-    let bg_changed = changed(|s| s.3 as u32) || changed(|s| s.4);
-    log(&format!("knob set the lamp: power {power} bright {bright} ct {ct} bg {bg_power} {bg_rgb:06x}"));
+    let main_changed = r.changed & (CHANGED_BRIGHT | CHANGED_CT) != 0;
+    let bg_changed = r.changed & (CHANGED_BG_POWER | CHANGED_BG_RGB) != 0;
+    log(&format!(
+        "knob set the lamp ({:#04x}): power {} bright {} ct {} bg {} {:06x}",
+        r.changed, r.power, r.bright, r.ct, r.bg_power, r.bg_rgb
+    ));
 
-    *a.main_power.lock().unwrap() = Some(power);
-    if changed(|s| s.1 as u32) {
-        update_settings(true, |s| s.user_brightness = Some(bright as u32));
+    *a.main_power.lock().unwrap() = Some(r.power);
+    if r.changed & CHANGED_BRIGHT != 0 {
+        update_settings(true, |s| s.user_brightness = Some(r.bright as u32));
     }
-    if bg_changed {
-        a.bg_rgb.store(bg_rgb, Ordering::Relaxed);
+    if r.changed & CHANGED_BG_RGB != 0 {
+        a.bg_rgb.store(r.bg_rgb, Ordering::Relaxed);
     }
     ui_do(move |ui| {
         if main_changed && settings().circadian.enabled {
@@ -1050,7 +1074,8 @@ fn scheduler() {
                     }
                 }
                 if !a.lamp.streaming() && !a.visible.load(Ordering::Relaxed) {
-                    let _ = refresh_state();
+                    // Keep the (hidden) window's copy current too: the popup shows it
+                    show_lamp_state(refresh_state());
                 }
             }
             if tick % 60 == 0 {
@@ -1167,7 +1192,6 @@ fn main() {
         send_bg_bright,
         send_bg_rgb,
         dry_run: std::env::var_os("LAMP_DRY_RUN").is_some(),
-        knob_last: Mutex::new(None),
     });
 
     wire_callbacks(&ui);

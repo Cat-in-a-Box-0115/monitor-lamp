@@ -153,6 +153,7 @@ pub fn start(on_change: impl Fn(Option<Media>) + Send + 'static) {
         let mut session: Option<Session> = None;
         let mut tokens = None;
         let mut last: Option<Media> = None;
+        let mut delivered: Option<Media> = None;
         let mut sent_none = false;
         loop {
             let cur = mgr.GetCurrentSession().ok();
@@ -178,18 +179,20 @@ pub fn start(on_change: impl Fn(Option<Media>) + Send + 'static) {
                 None => {
                     if !sent_none {
                         last = None;
+                        delivered = None;
                         sent_none = true;
                         on_change(None);
                     }
                 }
                 Some((playing, title, artist, pos_ms, dur_ms)) => {
                     let same_track = last.as_ref().is_some_and(|l| l.title == title && l.artist == artist);
-                    let (art_id, art_rgba, art_rgb565) = if same_track {
+                    // Reuse the cover for the same track, unless it had none yet (browsers often publish
+                    // the cover a moment after the title)
+                    let (art_id, art_rgba, art_rgb565) = if same_track && last.as_ref().is_some_and(|l| l.art_id != 0) {
                         let l = last.as_ref().unwrap();
                         (l.art_id, l.art_rgba.clone(), l.art_rgb565.clone())
                     } else {
                         let props = session.as_ref().and_then(|s| s.TryGetMediaPropertiesAsync().ok()?.get().ok());
-                        // Browsers often publish the cover a moment after the title; a later event picks it up
                         let thumb = props.as_ref().and_then(read_thumbnail);
                         let art = thumb.as_deref().and_then(decode_art);
                         let id = fnv(fnv(2_166_136_261, title.as_bytes()), artist.as_bytes());
@@ -199,8 +202,9 @@ pub fn start(on_change: impl Fn(Option<Media>) + Send + 'static) {
                         }
                     };
                     let m = Media { playing, title, artist, pos_ms, dur_ms, at: Instant::now(), art_id, art_rgba, art_rgb565 };
-                    // Report real changes only: state, track, cover, or the position jumping (a seek)
-                    let changed = match &last {
+                    // Report real changes only: state, track, cover, or the position jumping (a seek).
+                    // Compared with what was last *reported*, so small seeks add up and get reported too.
+                    let changed = match &delivered {
                         None => true,
                         Some(l) => {
                             l.playing != m.playing
@@ -212,6 +216,7 @@ pub fn start(on_change: impl Fn(Option<Media>) + Send + 'static) {
                     };
                     sent_none = false;
                     if changed {
+                        delivered = Some(m.clone());
                         on_change(Some(m.clone()));
                     }
                     last = Some(m);
