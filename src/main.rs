@@ -6,7 +6,6 @@ mod flow;
 mod hooks;
 mod lamp;
 mod miio;
-mod settings;
 mod winutil;
 
 slint::include_modules!();
@@ -15,7 +14,7 @@ use capture::ScreenSync;
 use flow::FlowPlayer;
 use lamp::{Lamp, Latest, State};
 use serde_json::json;
-use settings::Settings;
+use detent::settings::{self, Settings};
 use slint::{Color, ComponentHandle, ModelRc, VecModel};
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -545,7 +544,7 @@ fn show_window(ui: &AppWindow) {
 /// the front. The window only exists once the event loop has created it, so
 /// this retries for a moment.
 fn prepare_native_window(attempt: u32) {
-    match winutil::find_own_window("Monitor Lamp") {
+    match winutil::find_own_window("Detent") {
         Some(hwnd) => {
             winutil::style_window(hwnd, WINDOW_BG);
             winutil::fix_dpi_resizing(hwnd);
@@ -809,7 +808,7 @@ fn create_tray() -> Option<tray_icon::TrayIcon> {
     use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
     use tray_icon::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
-    let open = MenuItem::new("Open Monitor Lamp", true, None);
+    let open = MenuItem::new("Open Detent", true, None);
     let on = MenuItem::new("Lamp on", true, None);
     let off = MenuItem::new("Lamp off", true, None);
     let sync = MenuItem::new("Screen sync", true, None);
@@ -863,7 +862,7 @@ fn create_tray() -> Option<tray_icon::TrayIcon> {
         }
     }));
 
-    let mut b = TrayIconBuilder::new().with_menu(Box::new(menu)).with_tooltip("Monitor Lamp").with_menu_on_left_click(false);
+    let mut b = TrayIconBuilder::new().with_menu(Box::new(menu)).with_tooltip("Detent").with_menu_on_left_click(false);
     if let Some(icon) = tray_icon_image() {
         b = b.with_icon(icon);
     }
@@ -934,6 +933,11 @@ fn main() {
         return;
     }
 
+    match settings::migrate_from(&settings::old_file(), &settings::file()) {
+        Ok(true) => log("settings: copied from Monitor Lamp"),
+        Ok(false) => {}
+        Err(e) => log(&format!("settings: couldn't copy from Monitor Lamp: {e}")),
+    }
     let (st, err) = settings::load();
     log(&match &err {
         Some(e) => format!("settings: defaults ({e})"),

@@ -1044,6 +1044,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "detent"
+version = "3.0.0"
+dependencies = [
+ "aes",
+ "cbc",
+ "hex",
+ "md-5",
+ "png 0.17.16",
+ "raw-window-handle",
+ "serde",
+ "serde_json",
+ "slint",
+ "slint-build",
+ "tray-icon",
+ "windows 0.58.0",
+ "windows-sys 0.59.0",
+ "winresource",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2965,26 +2985,6 @@ checksum = "b63fbc4a50860e98e7b2aa7804ded1db5cbc3aff9193adaff57a6931bf7c4b4c"
 dependencies = [
  "adler2",
  "simd-adler32",
-]
-
-[[package]]
-name = "monitor-lamp"
-version = "2.0.0"
-dependencies = [
- "aes",
- "cbc",
- "hex",
- "md-5",
- "png 0.17.16",
- "raw-window-handle",
- "serde",
- "serde_json",
- "slint",
- "slint-build",
- "tray-icon",
- "windows 0.58.0",
- "windows-sys 0.59.0",
- "winresource",
 ]
 
 [[package]]

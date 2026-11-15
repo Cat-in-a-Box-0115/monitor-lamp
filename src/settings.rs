@@ -1,5 +1,5 @@
-// Settings persisted as JSON in %APPDATA%\Monitor Lamp\settings.json
-// (same file and format as the earlier Electron version, so nothing is lost).
+// Settings persisted as JSON in %APPDATA%\Detent\settings.json. Same format as Monitor Lamp (and its
+// Electron predecessor); the old file is copied across once by `migrate_from`.
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -83,7 +83,24 @@ impl Default for Circadian {
 }
 
 pub fn dir() -> PathBuf {
-    PathBuf::from(std::env::var_os("APPDATA").unwrap_or_default()).join("Monitor Lamp")
+    PathBuf::from(std::env::var_os("APPDATA").unwrap_or_default()).join("Detent")
+}
+
+/// Where Monitor Lamp (Detent's earlier name) kept its settings
+pub fn old_file() -> PathBuf {
+    PathBuf::from(std::env::var_os("APPDATA").unwrap_or_default()).join("Monitor Lamp").join("settings.json")
+}
+
+/// Copies `old` to `new` once: only when `new` doesn't exist yet and `old` does. Returns whether it copied.
+pub fn migrate_from(old: &std::path::Path, new: &std::path::Path) -> std::io::Result<bool> {
+    if new.exists() || !old.exists() {
+        return Ok(false);
+    }
+    if let Some(dir) = new.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::copy(old, new)?;
+    Ok(true)
 }
 
 pub fn file() -> PathBuf {
@@ -105,4 +122,35 @@ pub fn load() -> (Settings, Option<String>) {
 pub fn save(s: &Settings) -> std::io::Result<()> {
     std::fs::create_dir_all(dir())?;
     std::fs::write(file(), serde_json::to_string_pretty(s).unwrap_or_default())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("detent-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn migrate_copies_old_settings_once() {
+        let d = tmp("migrate");
+        let old = d.join("Monitor Lamp").join("settings.json");
+        let new = d.join("Detent").join("settings.json");
+        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+        std::fs::write(&old, "{\"ip\":\"10.0.0.16\"}").unwrap();
+        assert!(migrate_from(&old, &new).unwrap());
+        assert_eq!(std::fs::read_to_string(&new).unwrap(), "{\"ip\":\"10.0.0.16\"}");
+        std::fs::write(&old, "{\"ip\":\"changed\"}").unwrap();
+        assert!(!migrate_from(&old, &new).unwrap());
+        assert_eq!(std::fs::read_to_string(&new).unwrap(), "{\"ip\":\"10.0.0.16\"}");
+
+        let none_old = d.join("nope.json");
+        let none_new = d.join("x").join("settings.json");
+        assert!(!migrate_from(&none_old, &none_new).unwrap());
+        assert!(!none_new.exists());
+    }
 }

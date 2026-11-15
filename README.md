@@ -1,6 +1,6 @@
-# Monitor Lamp
+# Detent
 
-A small Windows app that controls a **Yeelight Screen Light Bar** (`yeelink.light.lamp15`) over your
+The desk companion for my motorized knob (formerly **Monitor Lamp**). A small Windows app that controls a **Yeelight Screen Light Bar** (`yeelink.light.lamp15`) over your
 local network, with no cloud involved.
 
 - **Desk light:** on/off, brightness and colour temperature.
@@ -18,8 +18,8 @@ from your Xiaomi/Mijia account with a token extractor such as
 [Xiaomi-cloud-tokens-extractor](https://github.com/PiotrMachowski/Xiaomi-cloud-tokens-extractor).
 Enter both in the app under **Settings → Lamp** and press **Save and connect**.
 
-Settings are stored in `%APPDATA%\Monitor Lamp\settings.json`; the log is
-`%APPDATA%\Monitor Lamp\monitor-lamp.log` (tray menu → Open log).
+Settings are stored in `%APPDATA%\Detent\settings.json`; the log is
+`%APPDATA%\Detent\detent.log` (tray menu → Open log).
 
 ## How it talks to the lamp
 It uses the Xiaomi **miIO** protocol (UDP port 54321, AES-encrypted with the token). Unlike

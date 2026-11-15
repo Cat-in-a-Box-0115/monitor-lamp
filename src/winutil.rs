@@ -45,12 +45,12 @@ fn timestamp() -> String {
 // --- log -----------------------------------------------------------------
 
 pub fn log_file() -> PathBuf {
-    crate::settings::dir().join("monitor-lamp.log")
+    crate::settings::dir().join("detent.log")
 }
 
-/// %APPDATA%\Monitor Lamp\monitor-lamp.log — written synchronously so lines
+/// %APPDATA%\Detent\detent.log — written synchronously so lines
 /// survive the process being killed at sign-out. If that file can't be
-/// written, lines (and the reason) go to %TEMP%\monitor-lamp.log instead.
+/// written, lines (and the reason) go to %TEMP%\detent.log instead.
 pub fn log(msg: &str) {
     let line = format!("{} [{}] {}\n", timestamp(), std::process::id(), msg);
     let append = |path: &PathBuf, text: &str| -> std::io::Result<()> {
@@ -58,7 +58,7 @@ pub fn log(msg: &str) {
     };
     let main = log_file();
     if let Err(e) = std::fs::create_dir_all(crate::settings::dir()).and_then(|_| append(&main, &line)) {
-        let fallback = std::env::temp_dir().join("monitor-lamp.log");
+        let fallback = std::env::temp_dir().join("detent.log");
         let _ = append(&fallback, &format!("{}  (main log failed: {e})\n", line.trim_end()));
     }
 }
@@ -81,7 +81,7 @@ pub fn open_path(path: &std::path::Path) {
 // --- start with Windows ----------------------------------------------------
 
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
-const RUN_NAME: &str = "Monitor Lamp";
+const RUN_NAME: &str = "Detent";
 
 pub fn set_autostart(enabled: bool) {
     let key = wide(RUN_KEY);

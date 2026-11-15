@@ -45,7 +45,7 @@ pub fn start(handler: impl Fn(Event) + Send + Sync + 'static) {
         RegisterClassW(&wc);
         // A real (hidden) top-level window: message-only windows don't get
         // WM_ENDSESSION or power broadcasts.
-        let title = wide("Monitor Lamp hooks");
+        let title = wide("Detent hooks");
         let hwnd = CreateWindowExW(
             0,
             class.as_ptr(),

@@ -1,3 +1,4 @@
 /target
 # Machine-specific build settings (e.g. a short target-dir)
 /.cargo/config.toml
+.superpowers/
