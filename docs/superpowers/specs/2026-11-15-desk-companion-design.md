@@ -1,4 +1,8 @@
-# Desk companion: Monitor Lamp grows into the knob's PC app
+# Detent: Monitor Lamp grows into the knob's PC app
+
+Name (picked by Claude at Cat's request): **Detent**, the click a knob makes between positions. The exe is
+`Detent.exe` and settings move to `%APPDATA%\Detent\`. On first run the app copies `%APPDATA%\Monitor Lamp\settings.json`
+across, and `install.ps1` removes the old Monitor Lamp exe, Start Menu shortcut and Run key.
 
 Date: 2026-11-15 · Status: draft for approval
 
@@ -27,7 +31,7 @@ The goal is one lightweight app that does both jobs, with a calmer, minimal look
      This covers Melodia, which publishes SMTC with cover and timeline (`desktopApp/native-src/smtc`), and
      YouTube in a browser.
    - Synced lyrics from LRCLIB, matched to the playback position.
-   - CPU and GPU temperatures read from MSI Afterburner, which Cat already runs.
+   - CPU/GPU usage and temperature and RAM usage from MSI Afterburner (Cat runs it), sent to the knob only.
 4. **A link to the knob** that sends this data and set-up details, and receives the knob's lamp state so the popup
    stays in sync.
 5. **Stay light:** a single exe, around 40 MB of memory, 0% CPU when idle.
@@ -62,13 +66,14 @@ Cat chose a mix: C's look, B's controls, A's dividing lines. The final pick was 
      - Two thin sliders (2 px track, tick handle) with the value on the right: brightness `70%`, and warmth
        `4000K`, whose track is a muted warm-to-cool strip.
   2. **Playing:** a 42 px cover, title, artist in muted text, and `|◀ ❚❚ ▶|`. No progress bar.
-  3. **Footer:** `cpu 52°  gpu 61°` on the left; knob status on the right (a dot, or `knob usb` / `knob ble`).
+  3. **Footer:** knob status only (`knob usb` / `knob ble` / `no knob`), in muted text. CPU, GPU and RAM are
+     **not shown in the app** (Cat): they are collected only to send to the knob.
 - **What's left out:** icons, outlined boxes, progress bars, slider symbols, hint text.
 - **Behaviour:**
   - The popup opens from a left-click on the tray icon, anchored to the tray like Windows' volume flyout.
   - It closes when it loses focus.
   - Right-clicking the `back` tile, or the tray menu, opens the full window.
-  - Sections without data are hidden: no music means no PLAYING section, no Afterburner means no temperatures.
+  - Sections without data are hidden: no music means no PLAYING section, 
 - **Full window:** the same language. Plain rows separated by lines, no cards, no hint text. It covers:
   - Backlight modes (colour swatches, flows, screen sync).
   - Time of day.
@@ -177,8 +182,8 @@ This is what lets the knob replace the stock dial: it works while the PC is off 
   pick the current line from the SMTC position plus elapsed time, and cache to disk per track.
   Lyrics are only passed to the knob, never stored in the repo.
 - `stats.rs`: MSI Afterburner shared memory (`MAHMSharedMemory`). Read the GPU and CPU temperature, GPU usage,
-  CPU usage and RAM usage entries. The host name comes from Windows. If Afterburner isn't running or the entry is missing, the value is missing and the
-  popup hides it. CPU temperature needs Afterburner's monitoring of that sensor turned on; the full window says
+  CPU usage and RAM usage entries. The host name comes from Windows. If Afterburner isn't running or the entry is missing, the value is sent as missing
+  and the knob hides it. CPU temperature needs Afterburner's monitoring of that sensor turned on; the full window says
   so in one line.
 - `link.rs`: the `Link` trait, USB-serial discovery by the knob's VID/PID (my call: Espressif's VID `0x303A` with a
   project PID; both repos define it in one shared place in the protocol doc), reconnect, framing, and the message
@@ -203,7 +208,6 @@ No knob firmware has the data port yet.
 
 ## Left to the builder
 
-- The app's name: it keeps "Monitor Lamp" until Cat picks a new one.
 - How the popup is anchored and sized per DPI, and how it closes on focus loss.
 - Chunk sizes, the cover's pixel size, and retry and timeout details of the protocol.
 - How cached lyrics are stored.
