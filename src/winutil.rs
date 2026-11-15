@@ -284,3 +284,17 @@ pub fn style_window(hwnd: HWND, caption_rgb: u32) {
         DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR as u32, &colorref as *const _ as *const c_void, 4);
     }
 }
+
+/// Local time minus UTC, in minutes (e.g. -480 for Pacific Standard Time), including daylight saving
+pub fn utc_offset_minutes() -> i16 {
+    use windows_sys::Win32::System::Time::{GetTimeZoneInformation, TIME_ZONE_INFORMATION};
+    unsafe {
+        let mut tz: TIME_ZONE_INFORMATION = std::mem::zeroed();
+        let bias = match GetTimeZoneInformation(&mut tz) {
+            1 => tz.Bias + tz.StandardBias, // TIME_ZONE_ID_STANDARD
+            2 => tz.Bias + tz.DaylightBias, // TIME_ZONE_ID_DAYLIGHT
+            _ => tz.Bias,
+        };
+        (-bias) as i16
+    }
+}

@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 
 mod capture;
+mod companion;
 mod circadian;
 mod flow;
 mod hooks;
@@ -64,6 +65,8 @@ struct App {
     send_bg_bright: Arc<Latest<u32>>,
     send_bg_rgb: Arc<Latest<u32>>,
     dry_run: bool,
+    /// The knob's last LAMP_STATE: (power, bright, ct, bg_power, bg_rgb)
+    knob_last: Mutex<Option<(bool, u8, u16, bool, u32)>>,
 }
 
 static APP: OnceLock<App> = OnceLock::new();
@@ -293,7 +296,67 @@ fn show_lamp_state(s: Option<State>) {
     }
 }
 
+// --- the knob ----------------------------------------------------------------
+
+fn on_knob(m: detent::protocol::Msg) {
+    use detent::protocol::Msg;
+    match m {
+        Msg::LampState { power, bright, ct, bg_power, bg_rgb } => {
+            thread::spawn(move || on_knob_lamp((power, bright, ct, bg_power, bg_rgb)));
+        }
+        Msg::Hello { version, proto, .. } => log(&format!("knob: firmware {version}, protocol {proto}")),
+        Msg::Log(text) => log(&format!("knob says: {text}")),
+        _ => {}
+    }
+}
+
+/// The knob changed the lamp itself (over Wi-Fi). Treated like a change made in the app:
+/// brightness becomes the user's brightness, a brightness or warmth change hands control back from
+/// time of day, and a backlight change stops screen sync and colour flows.
+fn on_knob_lamp(new: (bool, u8, u16, bool, u32)) {
+    let a = app();
+    touched();
+    let prev = a.knob_last.lock().unwrap().replace(new).or_else(|| {
+        let s = a.lamp.state().ok()?;
+        Some((s.power, s.bright as u8, s.ct as u16, s.bg_power, s.bg_rgb))
+    });
+    let (power, bright, ct, bg_power, bg_rgb) = new;
+    let changed = |f: fn(&(bool, u8, u16, bool, u32)) -> u32| prev.as_ref().map_or(true, |p| f(p) != f(&new));
+    let main_changed = changed(|s| s.1 as u32) || changed(|s| s.2 as u32);
+    let bg_changed = changed(|s| s.3 as u32) || changed(|s| s.4);
+    log(&format!("knob set the lamp: power {power} bright {bright} ct {ct} bg {bg_power} {bg_rgb:06x}"));
+
+    *a.main_power.lock().unwrap() = Some(power);
+    if changed(|s| s.1 as u32) {
+        update_settings(true, |s| s.user_brightness = Some(bright as u32));
+    }
+    if bg_changed {
+        a.bg_rgb.store(bg_rgb, Ordering::Relaxed);
+    }
+    ui_do(move |ui| {
+        if main_changed && settings().circadian.enabled {
+            set_circadian_enabled(ui, false);
+        }
+        if bg_changed {
+            stop_sync(ui);
+            if app().flow.running() {
+                stop_flow(ui);
+            }
+        }
+    });
+    poll_state();
+}
+
 // --- UI updates (UI thread) -----------------------------------------------------
+
+fn show_media(_ui: &AppWindow, m: Option<media::Media>) {
+    // Filled in with the popup (Task 8)
+    let _ = m;
+}
+
+fn show_knob(_ui: &AppWindow, up: bool) {
+    let _ = up;
+}
 
 fn apply_state(ui: &AppWindow, s: &State) {
     let a = app();
@@ -1015,6 +1078,7 @@ fn main() {
         send_bg_bright,
         send_bg_rgb,
         dry_run: std::env::var_os("LAMP_DRY_RUN").is_some(),
+        knob_last: Mutex::new(None),
     });
 
     wire_callbacks(&ui);
@@ -1031,6 +1095,7 @@ fn main() {
     }
     hooks::start(on_hook);
     scheduler();
+    companion::start(|m| ui_do(move |ui| show_media(ui, m)), |up| ui_do(move |ui| show_knob(ui, up)), on_knob);
     log(&format!(
         "window and tray created{}; lamp {}",
         if tray.is_some() { "" } else { " (NO tray)" },
