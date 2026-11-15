@@ -6,6 +6,7 @@ mod flow;
 mod hooks;
 mod lamp;
 mod miio;
+mod stats;
 mod winutil;
 
 slint::include_modules!();

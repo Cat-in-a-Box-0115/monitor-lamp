@@ -4,3 +4,4 @@ pub mod settings;
 pub mod protocol;
 pub mod lrc;
 pub mod lyrics;
+pub mod mahm;
