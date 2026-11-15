@@ -329,7 +329,7 @@ mod tests {
             Msg::Lyrics { line_id: 7, prev: "the harbour lights".into(), cur: "fold into the water".into(), next: "".into() },
             Msg::LyricsNone,
             Msg::PcStats { cpu_pct: Some(12), cpu_c: None, gpu_pct: Some(3), gpu_c: Some(61), ram_pct: Some(48), host: "DESK".into() },
-            Msg::Provision { ssid: "home".into(), pass: "pa ss".into(), lamp_ip: "10.0.0.16".into(), lamp_token: "00112233445566778899aabbccddeeff".into() },
+            Msg::Provision { ssid: "home".into(), pass: "pa ss".into(), lamp_ip: "192.168.1.50".into(), lamp_token: "00112233445566778899aabbccddeeff".into() },
             Msg::Time { unix: 1_794_758_659, tz_min: -480 },
             Msg::LampState { changed: CHANGED_BRIGHT | CHANGED_CT, power: true, bright: 70, ct: 4000, bg_power: false, bg_rgb: 0xFFB340 },
             Msg::Log("hello from the knob".into()),

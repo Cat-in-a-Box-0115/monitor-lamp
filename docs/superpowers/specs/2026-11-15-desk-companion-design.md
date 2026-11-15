@@ -1,6 +1,6 @@
 # Detent: Monitor Lamp grows into the knob's PC app
 
-Name (picked by Claude at Cat's request): **Detent**, the click a knob makes between positions. The exe is
+Name (picked by Claude at the owner's request): **Detent**, the click a knob makes between positions. The exe is
 `Detent.exe` and settings move to `%APPDATA%\Detent\`. On first run the app copies `%APPDATA%\Monitor Lamp\settings.json`
 across, and `install.ps1` removes the old Monitor Lamp exe, Start Menu shortcut and Run key.
 
@@ -8,11 +8,11 @@ Date: 2026-11-15 · Status: draft for approval
 
 ## Why
 
-Cat has a Windows tray app, Monitor Lamp, that controls the Yeelight Screen Light Bar Pro (`yeelink.light.lamp15`).
+The owner has a Windows tray app, Monitor Lamp, that controls the Yeelight Screen Light Bar Pro (`yeelink.light.lamp15`).
 It's mostly used to switch the lamp on and off with the PC. It works well, but its interface "feels AI-looking".
 
-Cat is also building a motorized haptic knob (repo `Cat-in-a-Box-0115/motorized-knob`). The knob needs a PC companion
-for its MEDIA, lyrics and PC screens. Cat also wants the knob to **replace the lamp's own wireless dial**, which they
+The owner is also building a motorized haptic knob (repo `Cat-in-a-Box-0115/motorized-knob`). The knob needs a PC companion
+for its MEDIA, lyrics and PC screens. the owner also wants the knob to **replace the lamp's own wireless dial**, which they
 find poor.
 
 The goal is one lightweight app that does both jobs, with a calmer, minimal look.
@@ -31,14 +31,14 @@ The goal is one lightweight app that does both jobs, with a calmer, minimal look
      This covers Melodia, which publishes SMTC with cover and timeline (`desktopApp/native-src/smtc`), and
      YouTube in a browser.
    - Synced lyrics from LRCLIB, matched to the playback position.
-   - CPU/GPU usage and temperature and RAM usage from MSI Afterburner (Cat runs it), sent to the knob only.
+   - CPU/GPU usage and temperature and RAM usage from MSI Afterburner (the owner runs it), sent to the knob only.
 4. **A link to the knob** that sends this data and set-up details, and receives the knob's lamp state so the popup
    stays in sync.
 5. **Stay light:** a single exe, around 40 MB of memory, 0% CPU when idle.
 
 ## Non-goals
 
-- A web-based interface (Tauri, Electron, WebView). Cat ruled this out.
+- A web-based interface (Tauri, Electron, WebView). the owner ruled this out.
 - Rewriting the parts that work: the miIO client, the shutdown hooks, screen capture and flows stay as they are.
 - macOS support.
 - Emulating the stock dial's radio protocol. It isn't documented, and the miIO path (below) does the job better.
@@ -51,9 +51,9 @@ The goal is one lightweight app that does both jobs, with a calmer, minimal look
 - Monitor Lamp's on/off reliability gets worse.
 - Volume or media keys only work while the app is running.
 
-## Look (agreed with Cat in mockups)
+## Look (agreed with the owner in mockups)
 
-Cat chose a mix: C's look, B's controls, A's dividing lines. The final pick was the "soft tiles" version.
+The owner chose a mix: C's look, B's controls, A's dividing lines. The final pick was the "soft tiles" version.
 
 - **Ground:** near-black `#0E0E0E`. Text `#E8E5DE`, muted text `#6A6762`. Lines `#242321`, 1 px, full-bleed,
   separating sections.
@@ -67,7 +67,7 @@ Cat chose a mix: C's look, B's controls, A's dividing lines. The final pick was 
        `4000K`, whose track is a muted warm-to-cool strip.
   2. **Playing:** a 42 px cover, title, artist in muted text, and `|◀ ❚❚ ▶|`. No progress bar.
   3. **Footer:** knob status only (`knob usb` / `knob ble` / `no knob`), in muted text. CPU, GPU and RAM are
-     **not shown in the app** (Cat): they are collected only to send to the knob.
+     **not shown in the app** (the owner): they are collected only to send to the knob.
 - **What's left out:** icons, outlined boxes, progress bars, slider symbols, hint text.
 - **Behaviour:**
   - The popup opens from a left-click on the tray icon, anchored to the tray like Windows' volume flyout.
@@ -95,9 +95,9 @@ appear in square-cornered strips.
 2. **Rewrite in C#/.NET.** Some APIs are easier, but it uses about twice the memory and means redoing the working
    lamp code.
 3. **Web-based (Tauri/Electron).** 100–200 MB of memory. Monitor Lamp already moved away from Electron for this
-   reason, and Cat ruled it out.
+   reason, and the owner ruled it out.
 
-Cat: "whichever is easier, but don't use web based". I picked 1.
+The owner: "whichever is easier, but don't use web based". I picked 1.
 
 ## Architecture: who talks to whom
 
@@ -161,7 +161,7 @@ This is what lets the knob replace the stock dial: it works while the PC is off 
     host name.
   - `PROVISION(ssid, pass, lamp_ip, lamp_token)`: sent only from a **"Set up knob"** button in the full window's Knob
     section (my call):
-    - Cat types the Wi-Fi name and password there.
+    - The owner types the Wi-Fi name and password there.
     - The password is sent once and not saved.
     - The lamp IP and token come from the existing lamp settings.
     - It is not read from Windows' saved Wi-Fi profiles, because that needs admin rights and the PC may be on

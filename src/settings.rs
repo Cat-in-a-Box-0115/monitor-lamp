@@ -141,12 +141,12 @@ mod tests {
         let old = d.join("Monitor Lamp").join("settings.json");
         let new = d.join("Detent").join("settings.json");
         std::fs::create_dir_all(old.parent().unwrap()).unwrap();
-        std::fs::write(&old, "{\"ip\":\"10.0.0.16\"}").unwrap();
+        std::fs::write(&old, "{\"ip\":\"192.168.1.50\"}").unwrap();
         assert!(migrate_from(&old, &new).unwrap());
-        assert_eq!(std::fs::read_to_string(&new).unwrap(), "{\"ip\":\"10.0.0.16\"}");
+        assert_eq!(std::fs::read_to_string(&new).unwrap(), "{\"ip\":\"192.168.1.50\"}");
         std::fs::write(&old, "{\"ip\":\"changed\"}").unwrap();
         assert!(!migrate_from(&old, &new).unwrap());
-        assert_eq!(std::fs::read_to_string(&new).unwrap(), "{\"ip\":\"10.0.0.16\"}");
+        assert_eq!(std::fs::read_to_string(&new).unwrap(), "{\"ip\":\"192.168.1.50\"}");
 
         let none_old = d.join("nope.json");
         let none_new = d.join("x").join("settings.json");
