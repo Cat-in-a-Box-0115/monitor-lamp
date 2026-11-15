@@ -5,3 +5,4 @@ pub mod protocol;
 pub mod lrc;
 pub mod lyrics;
 pub mod mahm;
+pub mod link;

@@ -37,6 +37,7 @@ ureq = { version = "2", default-features = false, features = ["tls", "json"] }
 # Screen sync capture (DXGI desktop duplication, downscaled on the GPU)
 [target.'cfg(windows)'.dependencies]
 tray-icon = "0.21"
+serialport = { version = "4", default-features = false }
 
 [target.'cfg(windows)'.dependencies.windows]
 version = "0.58"

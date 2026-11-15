@@ -4,6 +4,7 @@ mod capture;
 mod circadian;
 mod flow;
 mod hooks;
+mod knob;
 mod lamp;
 mod media;
 mod miio;
