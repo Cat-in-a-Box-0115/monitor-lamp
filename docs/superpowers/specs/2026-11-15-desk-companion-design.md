@@ -12,7 +12,7 @@ The owner has a Windows tray app, Monitor Lamp, that controls the Yeelight Scree
 It's mostly used to switch the lamp on and off with the PC. It works well, but its interface "feels AI-looking".
 
 The owner is also building a motorized haptic knob (repo `Cat-in-a-Box-0115/motorized-knob`). The knob needs a PC companion
-for its MEDIA, lyrics and PC screens. the owner also wants the knob to **replace the lamp's own wireless dial**, which they
+for its MEDIA, lyrics and PC screens. The owner also wants the knob to **replace the lamp's own wireless dial**, which they
 find poor.
 
 The goal is one lightweight app that does both jobs, with a calmer, minimal look.
@@ -38,7 +38,7 @@ The goal is one lightweight app that does both jobs, with a calmer, minimal look
 
 ## Non-goals
 
-- A web-based interface (Tauri, Electron, WebView). the owner ruled this out.
+- A web-based interface (Tauri, Electron, WebView). The owner ruled this out.
 - Rewriting the parts that work: the miIO client, the shutdown hooks, screen capture and flows stay as they are.
 - macOS support.
 - Emulating the stock dial's radio protocol. It isn't documented, and the miIO path (below) does the job better.
