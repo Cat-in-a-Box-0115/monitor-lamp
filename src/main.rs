@@ -5,6 +5,7 @@ mod circadian;
 mod flow;
 mod hooks;
 mod lamp;
+mod media;
 mod miio;
 mod stats;
 mod winutil;
