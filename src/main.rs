@@ -8,6 +8,7 @@ mod hooks;
 mod knob;
 mod lamp;
 mod media;
+mod popup;
 mod miio;
 mod stats;
 mod winutil;
@@ -44,7 +45,7 @@ const FLOWS: &[(&str, &[u32])] = &[
 ];
 const SMOOTH_LABELS: [&str; 11] =
     ["Instant", "Very fast", "Fast", "Fast", "Balanced", "Balanced", "Smooth", "Smooth", "Very smooth", "Very smooth", "Ambient"];
-const SYNC_IDLE: &str = "Matches the backlight to your main screen in real time.";
+const SYNC_IDLE: &str = "";
 
 struct App {
     settings: Mutex<Settings>,
@@ -52,13 +53,14 @@ struct App {
     flow: Arc<FlowPlayer>,
     sync: Arc<ScreenSync>,
     ui: slint::Weak<AppWindow>,
+    popup: slint::Weak<Popup>,
     main_power: Mutex<Option<bool>>,           // so time-of-day updates don't wake an off lamp
     circ_last: Mutex<(Option<u32>, Option<u32>)>, // last ct / brightness sent by time-of-day
     status_error: Mutex<Option<String>>,
     session_ending: AtomicBool,
     visible: AtomicBool,
     input_seq: AtomicU64,
-    last_input: Mutex<Instant>,
+    pub last_input: Mutex<Instant>,
     bg_rgb: AtomicU32,
     send_bright: Arc<Latest<u32>>,
     send_temp: Arc<Latest<u32>>,
@@ -71,7 +73,7 @@ struct App {
 
 static APP: OnceLock<App> = OnceLock::new();
 
-fn app() -> &'static App {
+pub(crate) fn app() -> &'static App {
     APP.get().expect("app not initialised")
 }
 
@@ -350,12 +352,97 @@ fn on_knob_lamp(new: (bool, u8, u16, bool, u32)) {
 // --- UI updates (UI thread) -----------------------------------------------------
 
 fn show_media(_ui: &AppWindow, m: Option<media::Media>) {
-    // Filled in with the popup (Task 8)
-    let _ = m;
+    let Some(p) = app().popup.upgrade() else { return };
+    p.set_has_media(m.is_some());
+    if let Some(m) = m {
+        p.set_song(m.title.into());
+        p.set_artist(m.artist.into());
+        p.set_playing(m.playing);
+        match &m.art_rgba {
+            Some(px) => {
+                let buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(px, media::ART_POPUP, media::ART_POPUP);
+                p.set_art(slint::Image::from_rgba8(buf));
+                p.set_has_art(true);
+            }
+            None => p.set_has_art(false),
+        }
+    }
 }
 
-fn show_knob(_ui: &AppWindow, up: bool) {
-    let _ = up;
+fn show_knob(ui: &AppWindow, up: bool) {
+    ui.set_knob_up(up);
+    ui.set_knob_text(if up { "connected over usb" } else { "not connected" }.into());
+    if let Some(p) = app().popup.upgrade() {
+        p.set_knob_text(if up { "knob usb" } else { "no knob" }.into());
+    }
+}
+
+fn wire_popup(p: &Popup, ui: &AppWindow) {
+    let w = ui.as_weak();
+    let pw = p.as_weak();
+    p.on_main_toggled({
+        let w = w.clone();
+        move |v| w.unwrap().invoke_main_toggled(v)
+    });
+    p.on_bg_toggled({
+        let w = w.clone();
+        move |v| w.unwrap().invoke_bg_toggled(v)
+    });
+    p.on_auto_clicked({
+        let w = w.clone();
+        move || w.unwrap().invoke_auto_clicked()
+    });
+    p.on_bright_moved({
+        let w = w.clone();
+        move |v| {
+            let ui = w.unwrap();
+            ui.set_main_bright(v);
+            ui.invoke_main_bright_moved(v);
+        }
+    });
+    p.on_temp_moved({
+        let w = w.clone();
+        move |v| {
+            let ui = w.unwrap();
+            ui.set_main_temp(v);
+            ui.invoke_main_temp_moved(v);
+        }
+    });
+    p.on_media(|i| {
+        media::key(match i {
+            0 => media::MediaKey::Prev,
+            2 => media::MediaKey::Next,
+            _ => media::MediaKey::PlayPause,
+        })
+    });
+    let open = {
+        let (w, pw) = (w.clone(), pw.clone());
+        move || {
+            if let Some(p) = pw.upgrade() {
+                popup::hide(&p);
+            }
+            let ui = w.unwrap();
+            ui.set_view(0);
+            show_window(&ui);
+        }
+    };
+    p.on_bg_options(open.clone());
+    p.on_open_window(open);
+
+    ui.on_provision(|ssid, pass| {
+        let ui = app().ui.unwrap();
+        let st = settings();
+        let msg = if ssid.trim().is_empty() {
+            "enter the wi-fi name"
+        } else if st.ip.is_empty() || st.token.is_empty() {
+            "add the lamp's ip and token first"
+        } else if companion::provision(ssid.trim().into(), pass.into(), st.ip.clone(), st.token.clone()) {
+            "sent. the knob joins wi-fi and finds the lamp"
+        } else {
+            "plug the knob in first"
+        };
+        ui.set_provision_result(msg.into());
+    });
 }
 
 fn apply_state(ui: &AppWindow, s: &State) {
@@ -574,7 +661,7 @@ fn stop_sync(ui: &AppWindow) {
     }
     a.sync.stop();
     ui.set_sync_running(false);
-    ui.set_sync_hex("Not running".into());
+    ui.set_sync_hex("not running".into());
     ui.set_sync_rate(SYNC_IDLE.into());
     ui.set_bg_sub("Behind the monitor".into());
     show_bg_color(ui, a.bg_rgb.load(Ordering::Relaxed));
@@ -921,8 +1008,8 @@ fn create_tray() -> Option<tray_icon::TrayIcon> {
     TrayIconEvent::set_event_handler(Some(|e: TrayIconEvent| {
         if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = e {
             let _ = slint::invoke_from_event_loop(|| {
-                if let Some(ui) = app().ui.upgrade() {
-                    show_window(&ui);
+                if let (Some(ui), Some(p)) = (app().ui.upgrade(), app().popup.upgrade()) {
+                    popup::toggle(&p, &ui);
                 }
             });
         }
@@ -1011,6 +1098,7 @@ fn main() {
     });
 
     let ui = AppWindow::new().expect("couldn't create the window");
+    let pop = Popup::new().expect("couldn't create the popup");
     ui.set_version(env!("CARGO_PKG_VERSION").into());
     ui.set_swatches(ModelRc::new(VecModel::from(SWATCHES.iter().map(|c| color(*c)).collect::<Vec<_>>())));
     ui.set_flows(ModelRc::new(VecModel::from(FLOWS.iter().map(|(n, c)| flow_item(n, c)).collect::<Vec<_>>())));
@@ -1065,6 +1153,7 @@ fn main() {
         flow,
         sync,
         ui: ui.as_weak(),
+        popup: pop.as_weak(),
         main_power: Mutex::new(None),
         circ_last: Mutex::new((None, None)),
         status_error: Mutex::new(None),
@@ -1082,6 +1171,7 @@ fn main() {
     });
 
     wire_callbacks(&ui);
+    wire_popup(&pop, &ui);
     let tray = create_tray();
     show_settings(&ui);
     show_status(&ui);

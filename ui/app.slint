@@ -1,11 +1,13 @@
-// Monitor Lamp UI.
+// Detent UI: the tray popup and the full window.
 //
-// Quiet rows on a warm desk-dark ground, large readouts like a dimmer
-// display, and controls that take their colour from the light they control.
-// Solid fills and square-cornered gradients only: the software renderer
-// doesn't draw gradients inside rounded shapes.
+// Look (agreed with Cat, "soft tiles"): near-black ground, one monospace face, small spaced-out uppercase
+// section labels, 1 px full-bleed lines between sections, flat tiles that are lighter when on. No icons,
+// outlined boxes, progress bars or hint text. Colour only where it means something (each light's dot).
+// Solid fills only, plus square-cornered gradient strips: the software renderer draws gradients inside
+// rounded shapes badly.
 
-import { LineEdit, ScrollView } from "std-widgets.slint";
+import { ScrollView } from "std-widgets.slint";
+import "../assets/fonts/JetBrainsMono-Regular.ttf";
 
 export struct FlowItem {
     name: string,
@@ -30,199 +32,277 @@ export struct Prefs {
 }
 
 global Theme {
-    out property <color> room: #1f1f1f;
-    out property <color> raised: #2a2a2a;
-    out property <color> line: #3a3a3a;
-    out property <color> ink: #ececec;
-    out property <color> muted: #8f8f8f;
+    out property <color> ground: #0e0e0e;
+    out property <color> tile: #151514;
+    out property <color> tile-on: #1f1e1c;
+    out property <color> line: #242321;
+    out property <color> track: #2a2927;
+    out property <color> ink: #e8e5de;
+    out property <color> muted: #6a6762;
+    out property <color> fill: #8a877f;
     out property <color> warn: #e5735f;
-    out property <string> face: "Bahnschrift";
-    out property <[color]> rainbow: [#ff3b30, #ffcc00, #34c759, #00c7be, #0a84ff, #bf5af2, #ff3b30];
+    out property <string> face: "JetBrains Mono";
 }
 
 component Body inherits Text {
     color: Theme.ink;
-    font-size: 14px;
+    font-size: 13px;
+    font-family: Theme.face;
     vertical-alignment: center;
 }
 
-component Note inherits Text {
+component Muted inherits Text {
     color: Theme.muted;
     font-size: 12px;
+    font-family: Theme.face;
     vertical-alignment: center;
 }
 
-// Rocker-style switch; "on" takes the colour of the light it controls
-component Switch inherits Rectangle {
-    in property <bool> checked;
-    in property <color> on-color: Theme.ink;
-    in property <bool> enabled: true;
-    callback toggled(bool);
-    width: 40px;
-    height: 22px;
-    border-radius: 11px;
-    background: checked ? on-color : Theme.line;
-    opacity: enabled ? 1 : 0.4;
-    animate background { duration: 160ms; }
-    Rectangle {
-        width: 16px;
-        height: 16px;
-        y: 3px;
-        x: root.checked ? root.width - self.width - 3px : 3px;
-        border-radius: 8px;
-        background: root.checked ? Theme.room : Theme.muted;
-        animate x { duration: 160ms; easing: ease-out; }
-    }
+// Small spaced-out uppercase section label
+component Label inherits Text {
+    color: Theme.muted;
+    font-size: 10px;
+    font-family: Theme.face;
+    letter-spacing: 1.2px;
+}
+
+// 1 px line across the whole width (the parent's padding is undone by the caller with x/width)
+component Line inherits Rectangle {
+    height: 1px;
+    background: Theme.line;
+}
+
+// A word that can be clicked: bright when `active`, muted otherwise
+component Word inherits Text {
+    in property <bool> active: true;
+    callback clicked;
+    font-family: Theme.face;
+    font-size: 13px;
+    color: active ? Theme.ink : Theme.muted;
+    vertical-alignment: center;
     TouchArea {
-        enabled: root.enabled;
         mouse-cursor: pointer;
-        clicked => { root.toggled(!root.checked); }
+        clicked => { root.clicked(); }
     }
 }
 
-// Fader: thin track, filled in the light's colour, with a fader-cap handle
-component Fader inherits Rectangle {
+// Flat tile: name (with the light's dot) over its state; lighter when on
+component Tile inherits Rectangle {
+    in property <string> name;
+    in property <string> state;
+    in property <bool> on;
+    in property <color> dot: transparent;
+    callback clicked;
+    callback right-clicked;
+    height: 40px;
+    border-radius: 4px;
+    background: ta.pressed ? Theme.line : on ? Theme.tile-on : Theme.tile;
+    VerticalLayout {
+        padding-left: 10px;
+        alignment: center;
+        spacing: 1px;
+        HorizontalLayout {
+            spacing: 7px;
+            alignment: start;
+            if root.dot != transparent: VerticalLayout {
+                alignment: center;
+                Rectangle {
+                    width: 6px;
+                    height: 6px;
+                    border-radius: 3px;
+                    background: root.on ? root.dot : Theme.track;
+                }
+            }
+            Text {
+                text: root.name;
+                font-family: Theme.face;
+                font-size: 12px;
+                color: root.on ? Theme.ink : Theme.muted;
+            }
+        }
+        Text {
+            text: root.state;
+            font-family: Theme.face;
+            font-size: 10px;
+            color: Theme.muted;
+        }
+    }
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        pointer-event(e) => {
+            if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
+                root.right-clicked();
+            }
+        }
+        clicked => { root.clicked(); }
+    }
+}
+
+// Thin slider: 2 px track, tick handle, value on the right. `strip` replaces the fill with a colour strip.
+component Fader inherits HorizontalLayout {
     in-out property <float> value;
     in property <float> minimum: 0;
     in property <float> maximum: 100;
     in property <float> step: 1;
-    in property <color> fill: Theme.ink;
-    // Colours for a gradient track (temperature, hue) instead of a fill.
-    // Drawn as two-colour segments: the software renderer mishandles
-    // gradients with many stops.
-    in property <[color]> stops;
+    in property <string> text;
+    in property <bool> strip;
+    in property <color> strip-from: #7a5530;
+    in property <color> strip-to: #3b4a66;
     in property <bool> enabled: true;
     callback moved(float);
     callback released(float);
-    height: 26px;
+    spacing: 12px;
     opacity: enabled ? 1 : 0.4;
+    height: 22px;
     property <float> frac: max(0, min(1, (value - minimum) / (maximum - minimum)));
-    property <bool> plain: stops.length == 0;
 
-    if root.plain: Rectangle {
-        y: (parent.height - self.height) / 2;
-        height: 2px;
-        background: Theme.line;
-    }
-    if root.plain: Rectangle {
-        x: 0;
-        y: (parent.height - self.height) / 2;
-        width: cap.x + cap.width / 2;
-        height: 2px;
-        background: root.fill;
-    }
-    for c[i] in root.stops: Rectangle {
-        property <length> seg: root.width / max(1, root.stops.length - 1);
-        x: i * self.seg;
-        y: (parent.height - self.height) / 2;
-        width: i < root.stops.length - 1 ? self.seg : 0px;
-        height: 4px;
-        background: @linear-gradient(90deg, c 0%, root.stops[i + 1] 100%);
-    }
-    cap := Rectangle {
-        width: 8px;
-        height: 20px;
-        x: root.frac * (root.width - self.width);
-        y: (root.height - self.height) / 2;
-        border-radius: 2px;
-        background: Theme.ink;
-        border-width: 1px;
-        border-color: Theme.room;
-    }
-    TouchArea {
-        enabled: root.enabled;
-        mouse-cursor: pointer;
-        pointer-event(e) => {
-            if (e.button == PointerEventButton.left && e.kind == PointerEventKind.down) {
-                root.set-at(self.mouse-x);
+    track := Rectangle {
+        Rectangle {
+            y: (parent.height - self.height) / 2;
+            height: 2px;
+            background: root.strip ? @linear-gradient(90deg, root.strip-from 0%, Theme.track 50%, root.strip-to 100%) : Theme.track;
+        }
+        if !root.strip: Rectangle {
+            x: 0;
+            y: (parent.height - self.height) / 2;
+            width: root.frac * parent.width;
+            height: 2px;
+            background: Theme.fill;
+        }
+        Rectangle {
+            x: root.frac * (parent.width - self.width);
+            y: (parent.height - self.height) / 2;
+            width: 2px;
+            height: 12px;
+            background: Theme.ink;
+        }
+        TouchArea {
+            enabled: root.enabled;
+            mouse-cursor: pointer;
+            pointer-event(e) => {
+                if (e.button == PointerEventButton.left && e.kind == PointerEventKind.down) {
+                    root.set-at(self.mouse-x);
+                }
+                if (e.button == PointerEventButton.left && e.kind == PointerEventKind.up) {
+                    root.released(root.value);
+                }
             }
-            if (e.button == PointerEventButton.left && e.kind == PointerEventKind.up) {
+            moved => {
+                if (self.pressed) { root.set-at(self.mouse-x); }
+            }
+            scroll-event(e) => {
+                if (!root.enabled) { return reject; }
+                root.value = max(root.minimum, min(root.maximum, root.value + (e.delta-y > 0 ? root.step : -root.step) * max(1, round((root.maximum - root.minimum) / root.step / 50))));
+                root.moved(root.value);
                 root.released(root.value);
+                accept
             }
         }
-        moved => {
-            if (self.pressed) { root.set-at(self.mouse-x); }
-        }
+    }
+    if root.text != "": Text {
+        width: 54px;
+        text: root.text;
+        font-family: Theme.face;
+        font-size: 13px;
+        color: Theme.ink;
+        horizontal-alignment: right;
+        vertical-alignment: center;
     }
 
     function set-at(x: length) {
-        root.value = root.minimum + round(max(0, min(1, (x - cap.width / 2) / (root.width - cap.width))) * (root.maximum - root.minimum) / root.step) * root.step;
+        root.value = root.minimum + round(max(0, min(1, x / track.width)) * (root.maximum - root.minimum) / root.step) * root.step;
         root.moved(root.value);
     }
 }
 
-// Large numeric readout, like a dimmer display
-component Readout inherits HorizontalLayout {
-    in property <string> value;
-    in property <string> unit;
-    in property <color> tint: Theme.ink;
-    width: 92px;
-    height: 34px;
-    spacing: 2px;
-    alignment: start;
-    Text {
-        text: root.value;
-        font-family: Theme.face;
-        font-size: 28px;
-        color: root.tint;
-        vertical-alignment: bottom;
-    }
-    // sits on the number's baseline
-    VerticalLayout {
-        alignment: end;
-        padding-bottom: 5px;
-        Text {
-            text: root.unit;
-            font-family: Theme.face;
-            font-size: 13px;
-            color: Theme.muted;
-        }
+// A settings row: label on the left, "on"/"off" on the right
+component Toggle inherits HorizontalLayout {
+    in property <string> label;
+    in property <bool> checked;
+    callback toggled(bool);
+    height: 30px;
+    spacing: 12px;
+    Body { text: root.label; wrap: word-wrap; horizontal-stretch: 1; }
+    Word {
+        text: root.checked ? "on" : "off";
+        active: root.checked;
+        horizontal-alignment: right;
+        width: 30px;
+        clicked => { root.toggled(!root.checked); }
     }
 }
 
-// Text tabs with an underline under the current one
-component Tabs inherits HorizontalLayout {
-    in property <[string]> items;
-    in property <int> index;
-    callback selected(int);
-    spacing: 22px;
-    alignment: start;
-    for t[i] in root.items: VerticalLayout {
-        spacing: 5px;
-        Text {
-            text: t;
+// Text field: no box, just a line underneath
+component Field inherits VerticalLayout {
+    in property <string> label;
+    in-out property <string> text;
+    in property <string> placeholder;
+    in property <bool> password;
+    callback edited(string);
+    callback accepted(string);
+    spacing: 4px;
+    Muted { text: root.label; font-size: 11px; }
+    Rectangle {
+        height: 24px;
+        if root.text == "" && !input.has-focus: Text {
+            x: 0;
+            text: root.placeholder;
             font-family: Theme.face;
-            font-size: 14px;
-            color: i == root.index ? Theme.ink : Theme.muted;
-            TouchArea {
-                mouse-cursor: pointer;
-                clicked => { root.selected(i); }
-            }
+            font-size: 13px;
+            color: Theme.track;
+            vertical-alignment: center;
+            height: parent.height;
         }
-        Rectangle {
-            height: 2px;
-            background: i == root.index ? Theme.ink : transparent;
+        input := TextInput {
+            text <=> root.text;
+            font-family: Theme.face;
+            font-size: 13px;
+            color: Theme.ink;
+            vertical-alignment: center;
+            input-type: root.password ? InputType.password : InputType.text;
+            edited => { root.edited(self.text); }
+            accepted => { root.accepted(self.text); }
         }
+    }
+    Rectangle {
+        height: 1px;
+        background: input.has-focus ? Theme.fill : Theme.line;
+    }
+}
+
+component Button inherits Rectangle {
+    in property <string> text;
+    callback clicked;
+    height: 32px;
+    width: label.preferred-width + 28px;
+    border-radius: 4px;
+    background: ta.pressed ? Theme.line : ta.has-hover ? Theme.tile-on : Theme.tile;
+    label := Text {
+        text: root.text;
+        font-family: Theme.face;
+        font-size: 12px;
+        color: Theme.ink;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
     }
 }
 
 component Swatch inherits Rectangle {
     in property <color> fill;
     in property <bool> selected;
-    in property <string> glyph;
     callback clicked;
-    width: 22px;
-    height: 22px;
-    border-radius: 11px;
+    width: 18px;
+    height: 18px;
+    border-radius: 9px;
     background: fill;
-    border-width: selected ? 2px : 0px;
-    border-color: Theme.ink;
-    Text {
-        text: root.glyph;
-        color: Theme.ink;
-        font-size: 15px;
-        horizontal-alignment: center;
-        vertical-alignment: center;
+    Rectangle {
+        y: parent.height + 4px;
+        height: 1px;
+        background: root.selected ? Theme.ink : transparent;
     }
     TouchArea {
         mouse-cursor: pointer;
@@ -230,138 +310,208 @@ component Swatch inherits Rectangle {
     }
 }
 
-component TextButton inherits Rectangle {
-    in property <string> text;
-    callback clicked;
-    height: 34px;
-    min-width: 120px;
-    border-radius: 4px;
-    background: ta.pressed ? Theme.muted : Theme.ink;
-    Text {
-        text: root.text;
-        font-family: Theme.face;
-        font-size: 14px;
-        color: Theme.room;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-    }
-    ta := TouchArea {
-        mouse-cursor: pointer;
-        clicked => { root.clicked(); }
-    }
-}
-
-component IconButton inherits Rectangle {
-    in property <string> glyph;
-    callback clicked;
-    width: 32px;
-    height: 32px;
-    border-radius: 4px;
-    background: ta.has-hover ? #ffffff14 : transparent;
-    Text {
-        text: root.glyph;
-        font-family: "Segoe Fluent Icons";
-        font-size: 15px;
-        color: Theme.ink;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-    }
-    ta := TouchArea {
-        mouse-cursor: pointer;
-        clicked => { root.clicked(); }
-    }
-}
-
-component Row inherits HorizontalLayout {
+// The lamp block shared by the popup and the window: three tiles and two sliders
+component LampControls inherits VerticalLayout {
+    in property <bool> main-on;
+    in property <bool> bg-on;
+    in property <bool> auto-on;
+    in property <string> bg-state;
+    in property <color> desk-dot;
+    in property <color> bg-dot;
+    in-out property <float> bright;
+    in-out property <float> temp;
+    callback main-toggled(bool);
+    callback bg-toggled(bool);
+    callback bg-options();
+    callback auto-clicked();
+    callback bright-moved(float);
+    callback temp-moved(float);
     spacing: 12px;
+    HorizontalLayout {
+        spacing: 6px;
+        Tile {
+            name: "desk";
+            state: root.main-on ? "on" : "off";
+            on: root.main-on;
+            dot: root.desk-dot;
+            clicked => { root.main-toggled(!root.main-on); }
+        }
+        Tile {
+            name: "back";
+            state: root.bg-on ? root.bg-state : "off";
+            on: root.bg-on;
+            dot: root.bg-dot;
+            clicked => { root.bg-toggled(!root.bg-on); }
+            right-clicked => { root.bg-options(); }
+        }
+        Tile {
+            name: "auto";
+            state: root.auto-on ? "on" : "off";
+            on: root.auto-on;
+            clicked => { root.auto-clicked(); }
+        }
+    }
+    Fader {
+        minimum: 1;
+        maximum: 100;
+        value <=> root.bright;
+        text: round(root.bright) + "%";
+        moved(v) => { root.bright-moved(v); }
+    }
+    Fader {
+        minimum: 2700;
+        maximum: 6500;
+        step: 50;
+        strip: true;
+        value <=> root.temp;
+        text: round(root.temp) + "K";
+        moved(v) => { root.temp-moved(v); }
+    }
 }
 
-component SettingRow inherits HorizontalLayout {
-    in property <string> label;
-    in property <string> hint;
-    in property <bool> checked;
-    callback toggled(bool);
-    spacing: 12px;
-    padding-top: 4px;
-    padding-bottom: 4px;
-    VerticalLayout {
-        alignment: center;
-        spacing: 2px;
-        Body { text: root.label; wrap: word-wrap; }
-        if root.hint != "": Note { text: root.hint; wrap: word-wrap; }
-    }
-    VerticalLayout {
-        alignment: center;
-        Switch {
-            checked: root.checked;
-            toggled(v) => { root.toggled(v); }
+// ---------------------------------------------------------------------------------------------------
+// The tray popup
+
+export component Popup inherits Window {
+    title: "Detent popup";
+    no-frame: true;
+    always-on-top: true;
+    width: 300px;
+    height: layout.preferred-height;
+    background: Theme.ground;
+    default-font-family: Theme.face;
+
+    in property <bool> main-on;
+    in property <bool> bg-on;
+    in property <bool> auto-on;
+    in property <string> bg-state: "on";
+    in property <color> desk-dot: #ffd9a8;
+    in property <color> bg-dot: #ffb340;
+    in-out property <float> bright: 60;
+    in-out property <float> temp: 4000;
+    in property <bool> has-media;
+    in property <bool> playing;
+    in property <string> song;
+    in property <string> artist;
+    in property <image> art;
+    in property <bool> has-art;
+    in property <string> knob-text: "no knob";
+
+    callback main-toggled(bool);
+    callback bg-toggled(bool);
+    callback bg-options();
+    callback auto-clicked();
+    callback bright-moved(float);
+    callback temp-moved(float);
+    callback media(int); // 0 previous, 1 play/pause, 2 next
+    callback open-window();
+
+    layout := VerticalLayout {
+        padding: 20px;
+        padding-top: 18px;
+        padding-bottom: 14px;
+        spacing: 0px;
+
+        Label { text: "LAMP"; }
+        Rectangle { height: 10px; }
+        LampControls {
+            main-on: root.main-on;
+            bg-on: root.bg-on;
+            auto-on: root.auto-on;
+            bg-state: root.bg-state;
+            desk-dot: root.desk-dot;
+            bg-dot: root.bg-dot;
+            bright <=> root.bright;
+            temp <=> root.temp;
+            main-toggled(v) => { root.main-toggled(v); }
+            bg-toggled(v) => { root.bg-toggled(v); }
+            bg-options => { root.bg-options(); }
+            auto-clicked => { root.auto-clicked(); }
+            bright-moved(v) => { root.bright-moved(v); }
+            temp-moved(v) => { root.temp-moved(v); }
+        }
+
+        if root.has-media: VerticalLayout {
+            Rectangle { height: 16px; }
+            Rectangle { height: 1px; Line { x: -20px; width: parent.width + 40px; } }
+            Rectangle { height: 16px; }
+            Label { text: "PLAYING"; }
+            Rectangle { height: 10px; }
+            HorizontalLayout {
+                spacing: 12px;
+                height: 42px;
+                Rectangle {
+                    width: 42px;
+                    border-radius: 3px;
+                    background: Theme.tile-on;
+                    clip: true;
+                    if root.has-art: Image {
+                        source: root.art;
+                        width: parent.width;
+                        height: parent.height;
+                        image-fit: cover;
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 2px;
+                    horizontal-stretch: 1;
+                    Body { text: root.song; overflow: elide; }
+                    Muted { text: root.artist; overflow: elide; }
+                }
+                HorizontalLayout {
+                    spacing: 14px;
+                    alignment: end;
+                    Word { text: "|◀"; font-size: 11px; clicked => { root.media(0); } }
+                    // Play / pause: the font has no pause glyph, so the bars are drawn
+                    Rectangle {
+                        width: 16px;
+                        if root.playing: Rectangle {
+                            x: 4px; y: (parent.height - 10px) / 2; width: 2px; height: 10px; background: Theme.ink;
+                        }
+                        if root.playing: Rectangle {
+                            x: 10px; y: (parent.height - 10px) / 2; width: 2px; height: 10px; background: Theme.ink;
+                        }
+                        if !root.playing: Text {
+                            text: "▶"; font-family: Theme.face; font-size: 11px; color: Theme.ink;
+                            width: parent.width; height: parent.height;
+                            horizontal-alignment: center; vertical-alignment: center;
+                        }
+                        TouchArea { mouse-cursor: pointer; clicked => { root.media(1); } }
+                    }
+                    Word { text: "▶|"; font-size: 11px; clicked => { root.media(2); } }
+                }
+            }
+        }
+
+        Rectangle { height: 16px; }
+        Rectangle { height: 1px; Line { x: -20px; width: parent.width + 40px; } }
+        Rectangle { height: 12px; }
+        HorizontalLayout {
+            Muted { text: root.knob-text; font-size: 11px; }
+            Rectangle { }
+            Word {
+                text: "open";
+                active: false;
+                font-size: 11px;
+                clicked => { root.open-window(); }
+            }
         }
     }
 }
 
-component SectionTitle inherits Text {
-    font-family: Theme.face;
-    font-size: 17px;
-    color: Theme.ink;
-}
-
-// Section title with a small dot showing the light's current colour
-component LightTitle inherits HorizontalLayout {
-    in property <string> text;
-    in property <bool> on;
-    in property <color> light;
-    spacing: 8px;
-    alignment: start;
-    SectionTitle { text: root.text; }
-    VerticalLayout {
-        alignment: center;
-        Rectangle {
-            width: 8px;
-            height: 8px;
-            border-radius: 4px;
-            background: root.on ? root.light : Theme.line;
-        }
-    }
-}
-
-// Small on/off chip: filled when on, outlined when off
-component Chip inherits Rectangle {
-    in property <string> text;
-    in property <bool> active;
-    callback clicked;
-    width: label.preferred-width + 18px;
-    height: 22px;
-    border-radius: 11px;
-    background: active ? Theme.ink : transparent;
-    border-width: 1px;
-    border-color: active ? Theme.ink : Theme.line;
-    label := Text {
-        text: root.text;
-        font-size: 12px;
-        color: root.active ? Theme.room : Theme.muted;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-    }
-    TouchArea {
-        mouse-cursor: pointer;
-        clicked => { root.clicked(); }
-    }
-}
-
-component Hairline inherits Rectangle {
-    height: 1px;
-    background: Theme.line;
-}
+// ---------------------------------------------------------------------------------------------------
+// The full window
 
 export component AppWindow inherits Window {
     title: "Detent";
     icon: @image-url("../assets/icon.png");
     preferred-width: 380px;
-    preferred-height: 600px;
+    preferred-height: 640px;
     min-width: 340px;
     min-height: 480px;
-    background: Theme.room;
-    default-font-family: "Segoe UI Variable Text";
+    background: Theme.ground;
+    default-font-family: Theme.face;
 
     // 0 = main, 1 = settings
     in-out property <int> view: 0;
@@ -373,7 +523,7 @@ export component AppWindow inherits Window {
 
     // main light
     in property <bool> main-on;
-    in property <string> main-sub: "Shines on the desk";
+    in property <string> main-sub;
     in property <color> main-tint: #ffd9a8;
     in-out property <float> main-bright: 60;
     in-out property <float> main-temp: 4000;
@@ -384,7 +534,7 @@ export component AppWindow inherits Window {
     in property <bool> bg-on;
     in property <color> bg-color: #ffb340;
     in property <brush> bg-fill: #ffb340;
-    in property <string> bg-sub: "Behind the monitor";
+    in property <string> bg-sub;
     in property <string> bg-hex: "#FFB340";
     in-out property <float> bg-bright: 100;
     in-out property <float> hue: 36;
@@ -393,13 +543,13 @@ export component AppWindow inherits Window {
     in property <[FlowItem]> flows;
     in property <string> active-flow;
     in-out property <float> flow-speed: 4;
-    property <bool> custom-open;
+    property <string> custom-hex-text;
 
     // screen sync
     in property <bool> sync-running;
     in property <color> sync-color: #3a3631;
-    in property <string> sync-hex: "Not running";
-    in property <string> sync-rate: "Matches the backlight to your main screen in real time.";
+    in property <string> sync-hex: "not running";
+    in property <string> sync-rate;
     in-out property <float> sync-smooth: 3;
     in property <string> sync-smooth-label: "Fast";
 
@@ -413,6 +563,11 @@ export component AppWindow inherits Window {
     in property <string> curve-path;
     in property <float> now-frac;
     in property <string> lamp-test;
+
+    // knob
+    in property <string> knob-text: "not connected";
+    in property <bool> knob-up;
+    in-out property <string> provision-result;
 
     callback retry();
     callback main-toggled(bool);
@@ -433,270 +588,188 @@ export component AppWindow inherits Window {
     callback save-lamp(string, string);
     callback open-log();
     callback settings-opened();
+    callback provision(string, string); // Wi-Fi name, password
 
     if root.view == 0: main-scroll := ScrollView {
         VerticalLayout {
-            // Fit the window; otherwise long text would widen the page
             width: main-scroll.visible-width;
             alignment: start;
+            padding: 22px;
+            padding-top: 16px;
+            spacing: 0px;
 
             // status, and the way to settings
             HorizontalLayout {
-                padding-left: 20px;
-                padding-right: 12px;
-                padding-top: 10px;
-                height: 52px;
-                spacing: 8px;
-                Rectangle {
-                    Note {
-                        width: 100%;
-                        text: root.status-text;
-                        color: root.status-kind == 2 ? Theme.warn : Theme.muted;
-                        overflow: elide;
-                    }
-                    TouchArea {
-                        clicked => { root.retry(); }
-                    }
+                height: 24px;
+                spacing: 12px;
+                Muted {
+                    text: root.status-text;
+                    font-size: 11px;
+                    color: root.status-kind == 2 ? Theme.warn : Theme.muted;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                    TouchArea { clicked => { root.retry(); } }
                 }
-                IconButton {
-                    glyph: "\u{E713}";
+                Word {
+                    text: "settings";
+                    active: false;
+                    font-size: 11px;
                     clicked => {
                         root.view = 1;
                         root.settings-opened();
                     }
                 }
             }
+            Rectangle { height: 16px; }
 
-            VerticalLayout {
-                padding: 20px;
-                padding-top: 18px;
+            Label { text: "LAMP"; }
+            Rectangle { height: 10px; }
+            LampControls {
+                main-on: root.main-on;
+                bg-on: root.bg-on;
+                auto-on: root.auto-active;
+                bg-state: root.mode == 2 && root.sync-running ? "sync" : root.mode == 1 && root.active-flow != "" ? "flow" : "on";
+                desk-dot: root.main-tint;
+                bg-dot: root.bg-color;
+                bright <=> root.main-bright;
+                temp <=> root.main-temp;
+                main-toggled(v) => { root.main-toggled(v); }
+                bg-toggled(v) => { root.bg-toggled(v); }
+                auto-clicked => { root.auto-clicked(); }
+                bright-moved(v) => { root.main-bright-moved(v); }
+                temp-moved(v) => { root.main-temp-moved(v); }
+            }
+
+            Rectangle { height: 18px; }
+            Rectangle { height: 1px; Line { x: -22px; width: parent.width + 44px; } }
+            Rectangle { height: 18px; }
+
+            // backlight
+            HorizontalLayout {
+                Label { text: "BACKLIGHT"; vertical-alignment: center; }
+                Rectangle { }
+                HorizontalLayout {
+                    spacing: 16px;
+                    Word { text: "colour"; font-size: 12px; active: root.mode == 0; clicked => { root.mode-selected(0); } }
+                    Word { text: "flow"; font-size: 12px; active: root.mode == 1; clicked => { root.mode-selected(1); } }
+                    Word { text: "screen"; font-size: 12px; active: root.mode == 2; clicked => { root.mode-selected(2); } }
+                }
+            }
+            Rectangle { height: 12px; }
+            Fader {
+                minimum: 1;
+                maximum: 100;
+                value <=> root.bg-bright;
+                text: round(root.bg-bright) + "%";
+                enabled: root.bg-on;
+                moved(v) => { root.bg-bright-moved(v); }
+            }
+            Rectangle { height: 14px; }
+
+            if root.mode == 0: VerticalLayout {
                 spacing: 14px;
-
-                // desk (main) light
-                Row {
-                    VerticalLayout {
-                        alignment: center;
-                        spacing: 1px;
-                        HorizontalLayout {
-                            spacing: 12px;
-                            alignment: start;
-                            LightTitle {
-                                text: "Desk light";
-                                on: root.main-on;
-                                light: root.main-tint;
-                            }
-                            VerticalLayout {
-                                alignment: center;
-                                Chip {
-                                    text: "Time of day";
-                                    active: root.auto-active;
-                                    clicked => { root.auto-clicked(); }
-                                }
-                            }
-                        }
-                        Note {
-                            text: root.main-sub;
-                            overflow: elide;
-                        }
-                    }
-                    VerticalLayout {
-                        alignment: center;
-                        Switch {
-                            checked: root.main-on;
-                            toggled(v) => { root.main-toggled(v); }
-                        }
-                    }
-                }
-                Row {
-                    Readout {
-                        value: round(root.main-bright);
-                        unit: "%";
-                        tint: root.main-on ? Theme.ink : Theme.muted;
-                    }
-                    Fader {
-                        minimum: 1;
-                        maximum: 100;
-                        value <=> root.main-bright;
-                        moved(v) => { root.main-bright-moved(v); }
-                    }
-                }
-                Row {
-                    Readout {
-                        value: round(root.main-temp);
-                        unit: "K";
-                        tint: root.main-on ? Theme.ink : Theme.muted;
-                    }
-                    Fader {
-                        minimum: 2700;
-                        maximum: 6500;
-                        step: 50;
-                        value <=> root.main-temp;
-                        moved(v) => { root.main-temp-moved(v); }
-                    }
-                }
-
-                Rectangle { height: 6px; }
-
-                // backlight
-                Row {
-                    VerticalLayout {
-                        alignment: center;
-                        spacing: 1px;
-                        LightTitle {
-                            text: "Backlight";
-                            on: root.bg-on;
-                            light: root.bg-color;
-                        }
-                        Note {
-                            text: root.bg-sub;
-                            overflow: elide;
-                        }
-                    }
-                    VerticalLayout {
-                        alignment: center;
-                        Switch {
-                            checked: root.bg-on;
-                            toggled(v) => { root.bg-toggled(v); }
-                        }
-                    }
-                }
-                Row {
-                    Readout {
-                        value: round(root.bg-bright);
-                        unit: "%";
-                        tint: root.bg-on ? Theme.ink : Theme.muted;
-                    }
-                    Fader {
-                        minimum: 1;
-                        maximum: 100;
-                        value <=> root.bg-bright;
-                        moved(v) => { root.bg-bright-moved(v); }
-                    }
-                }
-                Tabs {
-                    items: ["Colour", "Flow", "Screen"];
-                    index: root.mode;
-                    selected(i) => { root.mode-selected(i); }
-                }
-
-                if root.mode == 0: VerticalLayout {
-                    spacing: 14px;
-                    HorizontalLayout {
-                        alignment: space-between;
-                        for c in root.swatches: Swatch {
+                HorizontalLayout {
+                    alignment: space-between;
+                    height: 24px;
+                    for c in root.swatches: VerticalLayout {
+                        alignment: start;
+                        Swatch {
                             fill: c;
                             selected: c == root.bg-color;
                             clicked => { root.pick-color(c); }
                         }
-                        Swatch {
-                            fill: Theme.line;
-                            glyph: "+";
-                            selected: root.custom-open;
-                            clicked => { root.custom-open = !root.custom-open; }
-                        }
                     }
-                    if root.custom-open: HorizontalLayout {
-                        spacing: 10px;
-                        hex := LineEdit {
-                            text: root.bg-hex;
-                            placeholder-text: "#FFB340";
-                            accepted(t) => { root.custom-hex(t); }
-                        }
-                        TextButton {
-                            min-width: 64px;
-                            text: "Use";
+                }
+                HorizontalLayout {
+                    spacing: 12px;
+                    hex := Field {
+                        label: "custom colour";
+                        text: root.bg-hex;
+                        placeholder: "#FFB340";
+                        horizontal-stretch: 1;
+                        accepted(t) => { root.custom-hex(t); }
+                    }
+                    VerticalLayout {
+                        alignment: end;
+                        Button {
+                            text: "use";
                             clicked => { root.custom-hex(hex.text); }
                         }
                     }
                 }
+            }
 
-                if root.mode == 1: VerticalLayout {
-                    spacing: 12px;
-                    Rectangle {
-                        property <length> col-w: (self.width - 20px) / 2;
-                        height: ceil(root.flows.length / 2) * 34px;
-                        for f[i] in root.flows: Rectangle {
-                            x: mod(i, 2) * (parent.col-w + 20px);
-                            y: floor(i / 2) * 34px;
-                            width: parent.col-w;
-                            height: 30px;
-                            property <bool> active: f.name == root.active-flow;
-                            Rectangle {
-                                x: 0;
-                                y: (parent.height - self.height) / 2;
-                                width: 44px;
-                                height: parent.active ? 8px : 4px;
-                                background: @linear-gradient(90deg, f.c1 0%, f.c2 25%, f.c3 50%, f.c4 75%, f.c5 100%);
-                            }
-                            Text {
-                                x: 56px;
-                                text: f.name;
-                                font-family: Theme.face;
-                                font-size: 14px;
-                                color: parent.active ? Theme.ink : Theme.muted;
-                                vertical-alignment: center;
-                                height: parent.height;
-                            }
-                            TouchArea {
-                                mouse-cursor: pointer;
-                                clicked => { root.flow-picked(f.name); }
-                            }
+            if root.mode == 1: VerticalLayout {
+                spacing: 4px;
+                for f in root.flows: HorizontalLayout {
+                    height: 28px;
+                    spacing: 14px;
+                    property <bool> active: f.name == root.active-flow;
+                    VerticalLayout {
+                        alignment: center;
+                        Rectangle {
+                            width: 44px;
+                            height: f.name == root.active-flow ? 6px : 3px;
+                            background: @linear-gradient(90deg, f.c1 0%, f.c2 25%, f.c3 50%, f.c4 75%, f.c5 100%);
                         }
                     }
-                    Row {
-                        Readout {
-                            value: round(root.flow-speed);
-                            unit: "speed";
-                        }
-                        Fader {
-                            minimum: 1;
-                            maximum: 10;
-                            value <=> root.flow-speed;
-                            moved(v) => { root.set-number("flowSpeed", v, false); }
-                            released(v) => { root.set-number("flowSpeed", v, true); }
+                    Word {
+                        text: f.name;
+                        active: parent.active;
+                        horizontal-stretch: 1;
+                        clicked => { root.flow-picked(f.name); }
+                    }
+                }
+                Rectangle { height: 8px; }
+                HorizontalLayout {
+                    spacing: 12px;
+                    Muted { text: "speed"; width: 60px; }
+                    Fader {
+                        minimum: 1;
+                        maximum: 10;
+                        value <=> root.flow-speed;
+                        text: round(root.flow-speed);
+                        moved(v) => { root.set-number("flowSpeed", v, false); }
+                        released(v) => { root.set-number("flowSpeed", v, true); }
+                    }
+                }
+            }
+
+            if root.mode == 2: VerticalLayout {
+                spacing: 14px;
+                HorizontalLayout {
+                    spacing: 12px;
+                    height: 32px;
+                    Rectangle {
+                        width: 32px;
+                        border-radius: 3px;
+                        background: root.sync-color;
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 1px;
+                        horizontal-stretch: 1;
+                        Body { text: root.sync-hex; }
+                        Muted { text: root.sync-rate; font-size: 11px; overflow: elide; }
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        Button {
+                            text: root.sync-running ? "stop" : "match screen";
+                            clicked => { root.sync-clicked(); }
                         }
                     }
                 }
-
-                if root.mode == 2: VerticalLayout {
-                    spacing: 14px;
-                    Row {
-                        Rectangle {
-                            width: 36px;
-                            height: 36px;
-                            border-radius: 4px;
-                            background: root.sync-color;
-                        }
-                        VerticalLayout {
-                            alignment: center;
-                            spacing: 1px;
-                            Body {
-                                text: root.sync-hex;
-                                font-family: Theme.face;
-                            }
-                            Note {
-                                text: root.sync-rate;
-                                wrap: word-wrap;
-                            }
-                        }
-                    }
-                    TextButton {
-                        text: root.sync-running ? "Stop matching" : "Match my screen";
-                        clicked => { root.sync-clicked(); }
-                    }
-                    Row {
-                        VerticalLayout {
-                            alignment: center;
-                            width: 92px;
-                            Body { text: root.sync-smooth-label; }
-                        }
-                        Fader {
-                            minimum: 0;
-                            maximum: 10;
-                            value <=> root.sync-smooth;
-                            moved(v) => { root.set-number("syncSmoothing", v, false); }
-                            released(v) => { root.set-number("syncSmoothing", v, true); }
-                        }
+                HorizontalLayout {
+                    spacing: 12px;
+                    Muted { text: "smooth"; width: 60px; }
+                    Fader {
+                        minimum: 0;
+                        maximum: 10;
+                        value <=> root.sync-smooth;
+                        text: root.sync-smooth-label;
+                        moved(v) => { root.set-number("syncSmoothing", v, false); }
+                        released(v) => { root.set-number("syncSmoothing", v, true); }
                     }
                 }
             }
@@ -706,39 +779,37 @@ export component AppWindow inherits Window {
     if root.view == 1: settings-scroll := ScrollView {
         VerticalLayout {
             width: settings-scroll.visible-width;
-            padding: 20px;
-            padding-top: 12px;
-            spacing: 12px;
+            padding: 22px;
+            padding-top: 16px;
+            spacing: 0px;
             alignment: start;
 
             HorizontalLayout {
-                spacing: 6px;
-                padding-bottom: 4px;
-                IconButton {
-                    glyph: "\u{E72B}";
+                height: 24px;
+                Word {
+                    text: "← lamp";
+                    active: false;
+                    font-size: 11px;
                     clicked => { root.view = 0; }
                 }
-                Text {
-                    text: "Settings";
-                    font-family: Theme.face;
-                    font-size: 22px;
-                    color: Theme.ink;
-                    vertical-alignment: center;
-                }
+                Rectangle { }
             }
+            Rectangle { height: 16px; }
 
-            SectionTitle { text: "Time of day"; }
-            SettingRow {
-                label: "Follow the time of day";
-                hint: "Cooler light by day, warmer and dimmer towards bedtime";
+            // time of day
+            Label { text: "TIME OF DAY"; }
+            Rectangle { height: 6px; }
+            Toggle {
+                label: "follow the time of day";
                 checked: root.prefs.circ-enabled;
                 toggled(v) => { root.set-bool("circadian.enabled", v); }
             }
+            Rectangle { height: 8px; }
             VerticalLayout {
                 spacing: 4px;
                 Rectangle {
-                    height: 52px;
-                    opacity: root.prefs.circ-enabled ? 1 : 0.4;
+                    height: 40px;
+                    opacity: root.prefs.circ-enabled ? 1 : 0.35;
                     for c[i] in root.curve-colors: Rectangle {
                         x: i * parent.width / root.curve-colors.length;
                         width: parent.width / root.curve-colors.length + 1px;
@@ -750,215 +821,216 @@ export component AppWindow inherits Window {
                         commands: root.curve-path;
                         viewbox-width: 1440;
                         viewbox-height: 100;
-                        stroke: #1f1f1f99;
+                        stroke: #0e0e0ecc;
                         stroke-width: 2px;
                     }
                     Rectangle {
                         x: root.now-frac * parent.width - 1px;
                         width: 2px;
-                        background: Theme.room;
+                        background: Theme.ground;
                     }
                 }
                 HorizontalLayout {
                     alignment: space-between;
-                    Note { text: "0:00"; font-size: 11px; }
-                    Note { text: "6:00"; font-size: 11px; }
-                    Note { text: "12:00"; font-size: 11px; }
-                    Note { text: "18:00"; font-size: 11px; }
-                    Note { text: "24:00"; font-size: 11px; }
+                    Muted { text: "0"; font-size: 10px; }
+                    Muted { text: "6"; font-size: 10px; }
+                    Muted { text: "12"; font-size: 10px; }
+                    Muted { text: "18"; font-size: 10px; }
+                    Muted { text: "24"; font-size: 10px; }
                 }
             }
+            Rectangle { height: 12px; }
             HorizontalLayout {
-                spacing: 12px;
-                VerticalLayout {
-                    spacing: 4px;
-                    Note { text: "Wake up"; }
-                    LineEdit {
-                        text: root.prefs.wake;
-                        placeholder-text: "07:30";
-                        edited(t) => { root.set-text("circadian.wake", t); }
-                    }
+                spacing: 16px;
+                Field {
+                    label: "wake up";
+                    text: root.prefs.wake;
+                    placeholder: "07:30";
+                    edited(t) => { root.set-text("circadian.wake", t); }
                 }
-                VerticalLayout {
-                    spacing: 4px;
-                    Note { text: "Bedtime"; }
-                    LineEdit {
-                        text: root.prefs.bed;
-                        placeholder-text: "23:00";
-                        edited(t) => { root.set-text("circadian.bed", t); }
-                    }
+                Field {
+                    label: "bedtime";
+                    text: root.prefs.bed;
+                    placeholder: "23:00";
+                    edited(t) => { root.set-text("circadian.bed", t); }
                 }
             }
-            Row {
-                Readout {
-                    value: round(root.wind-down / 6) / 10;
-                    unit: "h";
-                }
-                VerticalLayout {
-                    spacing: 0px;
-                    Note { text: "Winding down before bed"; }
+            Rectangle { height: 14px; }
+            VerticalLayout {
+                spacing: 8px;
+                HorizontalLayout {
+                    spacing: 12px;
+                    Muted { text: "wind down"; width: 92px; }
                     Fader {
                         minimum: 30;
                         maximum: 240;
                         step: 30;
                         value <=> root.wind-down;
+                        text: round(root.wind-down / 6) / 10 + "h";
                         moved(v) => { root.set-number("circadian.windDown", v, false); }
                         released(v) => { root.set-number("circadian.windDown", v, true); }
                     }
                 }
-            }
-            Row {
-                Readout {
-                    value: round(root.day-temp);
-                    unit: "K";
-                }
-                VerticalLayout {
-                    spacing: 0px;
-                    Note { text: "Daytime light"; }
+                HorizontalLayout {
+                    spacing: 12px;
+                    Muted { text: "day"; width: 92px; }
                     Fader {
                         minimum: 4000;
                         maximum: 6500;
                         step: 100;
                         value <=> root.day-temp;
+                        text: round(root.day-temp) + "K";
                         moved(v) => { root.set-number("circadian.dayTemp", v, false); }
                         released(v) => { root.set-number("circadian.dayTemp", v, true); }
                     }
                 }
-            }
-            Row {
-                Readout {
-                    value: round(root.night-temp);
-                    unit: "K";
-                }
-                VerticalLayout {
-                    spacing: 0px;
-                    Note { text: "Light at bedtime"; }
+                HorizontalLayout {
+                    spacing: 12px;
+                    Muted { text: "bedtime"; width: 92px; }
                     Fader {
                         minimum: 2700;
                         maximum: 4000;
                         step: 100;
                         value <=> root.night-temp;
+                        text: round(root.night-temp) + "K";
                         moved(v) => { root.set-number("circadian.nightTemp", v, false); }
                         released(v) => { root.set-number("circadian.nightTemp", v, true); }
                     }
                 }
             }
-            SettingRow {
-                label: "Dim towards bedtime";
+            Rectangle { height: 6px; }
+            Toggle {
+                label: "dim towards bedtime";
                 checked: root.prefs.circ-dim;
                 toggled(v) => { root.set-bool("circadian.dim", v); }
             }
-            Row {
-                Readout {
-                    value: round(root.night-level);
-                    unit: "%";
-                    tint: root.prefs.circ-dim ? Theme.ink : Theme.muted;
-                }
-                VerticalLayout {
-                    spacing: 0px;
-                    Note { text: "Brightness at bedtime, of your usual level"; }
-                    Fader {
-                        enabled: root.prefs.circ-dim;
-                        minimum: 10;
-                        maximum: 100;
-                        step: 5;
-                        value <=> root.night-level;
-                        moved(v) => { root.set-number("circadian.nightLevel", v, false); }
-                        released(v) => { root.set-number("circadian.nightLevel", v, true); }
-                    }
+            HorizontalLayout {
+                spacing: 12px;
+                Muted { text: "at bedtime"; width: 92px; }
+                Fader {
+                    enabled: root.prefs.circ-dim;
+                    minimum: 10;
+                    maximum: 100;
+                    step: 5;
+                    value <=> root.night-level;
+                    text: round(root.night-level) + "%";
+                    moved(v) => { root.set-number("circadian.nightLevel", v, false); }
+                    released(v) => { root.set-number("circadian.nightLevel", v, true); }
                 }
             }
 
-            Hairline { }
-            SectionTitle { text: "Starting up"; }
-            SettingRow {
-                label: "Start with Windows";
-                checked: root.prefs.open-at-login;
-                toggled(v) => { root.set-bool("openAtLogin", v); }
-            }
-            SettingRow {
-                label: "Start hidden in the tray";
-                checked: root.prefs.start-hidden;
-                toggled(v) => { root.set-bool("startHidden", v); }
-            }
-            SettingRow {
-                label: "Keep running in the tray when closed";
-                checked: root.prefs.close-to-tray;
-                toggled(v) => { root.set-bool("closeToTray", v); }
-            }
+            Rectangle { height: 18px; }
+            Rectangle { height: 1px; Line { x: -22px; width: parent.width + 44px; } }
+            Rectangle { height: 18px; }
 
-            Hairline { }
-            SectionTitle { text: "With the PC"; }
-            SettingRow {
-                label: "Turn on when I sign in";
+            Label { text: "WITH THE PC"; }
+            Rectangle { height: 6px; }
+            Toggle {
+                label: "on when I sign in";
                 checked: root.prefs.on-at-login;
                 toggled(v) => { root.set-bool("onAtLogin", v); }
             }
-            SettingRow {
-                label: "Turn off at shutdown";
-                hint: "Desk light and backlight fade out together";
+            Toggle {
+                label: "off at shutdown";
                 checked: root.prefs.off-at-shutdown;
                 toggled(v) => { root.set-bool("offAtShutdown", v); }
             }
-            SettingRow {
-                label: "Turn off when the PC sleeps, on when it wakes";
+            Toggle {
+                label: "off at sleep, on at wake";
                 checked: root.prefs.sleep-wake;
                 toggled(v) => { root.set-bool("sleepWake", v); }
             }
-            SettingRow {
-                label: "Turn off when I lock the PC";
+            Toggle {
+                label: "off when locked";
                 checked: root.prefs.lock-unlock;
                 toggled(v) => { root.set-bool("lockUnlock", v); }
             }
-            SettingRow {
-                label: "Tray on and off include the backlight";
+            Toggle {
+                label: "include the backlight";
                 checked: root.prefs.backlight-with-main;
                 toggled(v) => { root.set-bool("backlightWithMain", v); }
             }
 
-            Hairline { }
-            SectionTitle { text: "Lamp"; }
-            VerticalLayout {
-                spacing: 4px;
-                Note { text: "IP address"; }
-                ip := LineEdit { text: root.prefs.ip; }
+            Rectangle { height: 18px; }
+            Rectangle { height: 1px; Line { x: -22px; width: parent.width + 44px; } }
+            Rectangle { height: 18px; }
+
+            Label { text: "KNOB"; }
+            Rectangle { height: 8px; }
+            Body { text: root.knob-text; color: root.knob-up ? Theme.ink : Theme.muted; }
+            Rectangle { height: 12px; }
+            HorizontalLayout {
+                spacing: 16px;
+                ssid := Field { label: "wi-fi name"; }
+                pass := Field { label: "password"; password: true; }
             }
-            VerticalLayout {
-                spacing: 4px;
-                Note { text: "Token"; }
-                token := LineEdit {
-                    text: root.prefs.token;
-                    input-type: password;
-                }
-            }
+            Rectangle { height: 12px; }
             HorizontalLayout {
                 spacing: 12px;
-                TextButton {
-                    text: "Save and connect";
-                    min-width: 140px;
+                Button {
+                    text: "set up knob";
+                    clicked => {
+                        root.provision(ssid.text, pass.text);
+                        pass.text = "";
+                    }
+                }
+                Muted { text: root.provision-result; font-size: 11px; wrap: word-wrap; horizontal-stretch: 1; }
+            }
+            Rectangle { height: 10px; }
+            Muted { text: "cpu temperature needs afterburner's cpu sensor on"; font-size: 11px; wrap: word-wrap; }
+
+            Rectangle { height: 18px; }
+            Rectangle { height: 1px; Line { x: -22px; width: parent.width + 44px; } }
+            Rectangle { height: 18px; }
+
+            Label { text: "LAMP"; }
+            Rectangle { height: 8px; }
+            HorizontalLayout {
+                spacing: 16px;
+                ip := Field { label: "ip address"; text: root.prefs.ip; }
+                token := Field { label: "token"; text: root.prefs.token; password: true; }
+            }
+            Rectangle { height: 12px; }
+            HorizontalLayout {
+                spacing: 12px;
+                Button {
+                    text: "save and connect";
                     clicked => { root.save-lamp(ip.text, token.text); }
                 }
-                Note {
-                    text: root.lamp-test;
-                    wrap: word-wrap;
-                }
+                Muted { text: root.lamp-test; font-size: 11px; wrap: word-wrap; horizontal-stretch: 1; }
             }
 
+            Rectangle { height: 18px; }
+            Rectangle { height: 1px; Line { x: -22px; width: parent.width + 44px; } }
+            Rectangle { height: 18px; }
+
+            Label { text: "STARTING UP"; }
+            Rectangle { height: 6px; }
+            Toggle {
+                label: "start with windows";
+                checked: root.prefs.open-at-login;
+                toggled(v) => { root.set-bool("openAtLogin", v); }
+            }
+            Toggle {
+                label: "start hidden";
+                checked: root.prefs.start-hidden;
+                toggled(v) => { root.set-bool("startHidden", v); }
+            }
+            Toggle {
+                label: "keep running when closed";
+                checked: root.prefs.close-to-tray;
+                toggled(v) => { root.set-bool("closeToTray", v); }
+            }
+
+            Rectangle { height: 22px; }
             HorizontalLayout {
-                padding-top: 8px;
-                spacing: 8px;
-                Note { text: "Detent " + root.version; }
+                Muted { text: "detent " + root.version; font-size: 11px; }
                 Rectangle { }
-                Rectangle {
-                    width: log-text.preferred-width;
-                    log-text := Note {
-                        text: "Open log";
-                        color: Theme.ink;
-                    }
-                    TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => { root.open-log(); }
-                    }
+                Word {
+                    text: "open log";
+                    active: false;
+                    font-size: 11px;
+                    clicked => { root.open-log(); }
                 }
             }
         }
