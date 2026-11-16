@@ -2,6 +2,7 @@
 //! connect, then live messages. The port scanning and reconnect loop live in the app (`knob.rs`).
 
 use crate::protocol::{cover_chunks, encode, Decoder, Msg, FW_CHUNK, FW_DONE, FW_OK, PROTO_VER};
+use std::collections::VecDeque;
 use std::io::{self, ErrorKind, Read, Write};
 use std::time::{Duration, Instant};
 
@@ -45,12 +46,14 @@ pub struct Session<T: Read + Write> {
     io: T,
     dec: Decoder,
     sent_art: Option<u32>,
+    /// Messages read but not handed out yet (a firmware wait stops at FW_STATUS mid-batch)
+    pending: VecDeque<Msg>,
 }
 
 impl<T: Read + Write> Session<T> {
     /// Opens a session: sends HELLO, then the whole snapshot
     pub fn new(io: T, snap: &Snapshot) -> io::Result<Self> {
-        let mut s = Session { io, dec: Decoder::new(), sent_art: None };
+        let mut s = Session { io, dec: Decoder::new(), sent_art: None, pending: VecDeque::new() };
         s.send(&Msg::Hello { proto: PROTO_VER, version: env!("CARGO_PKG_VERSION").into(), caps: 0 })?;
         for m in snap.time.iter().chain(snap.now.iter()) {
             s.send(m)?;
@@ -88,7 +91,7 @@ impl<T: Read + Write> Session<T> {
 
     /// Reads whatever has arrived. A timeout means nothing arrived; other errors mean the knob is gone.
     pub fn poll(&mut self) -> io::Result<Vec<Msg>> {
-        let mut out = Vec::new();
+        let mut out: Vec<Msg> = self.pending.drain(..).collect();
         let mut buf = [0u8; 512];
         loop {
             match self.io.read(&mut buf) {
@@ -104,6 +107,20 @@ impl<T: Read + Write> Session<T> {
             }
         }
         Ok(out)
+    }
+}
+
+/// Why an update didn't finish
+#[derive(Debug, PartialEq)]
+pub struct FwFail {
+    pub text: String,
+    /// The knob got FW_END but its answer never came: it may well be running the new firmware
+    pub unconfirmed: bool,
+}
+
+impl FwFail {
+    fn new(text: impl Into<String>) -> Self {
+        FwFail { text: text.into(), unconfirmed: false }
     }
 }
 
@@ -124,19 +141,25 @@ impl Default for FwTimeouts {
 }
 
 impl<T: Read + Write> Session<T> {
-    /// Waits for the knob's next FW_STATUS; any other message goes to `other`
+    /// Waits for the knob's next FW_STATUS; other messages go to `other`, in order, and anything read after the
+    /// status stays queued for the next wait or poll
     fn fw_status(&mut self, wait: Duration, other: &mut dyn FnMut(Msg)) -> Result<(u8, u32, String), String> {
         let deadline = Instant::now() + wait;
         loop {
-            for m in self.poll().map_err(|e| format!("knob disconnected: {e}"))? {
+            while let Some(m) = self.pending.pop_front() {
                 match m {
                     Msg::FwStatus { state, offset, text } => return Ok((state, offset, text)),
                     m => other(m),
                 }
             }
-            if Instant::now() >= deadline {
-                return Err("the knob stopped answering".into());
+            let got = self.poll().map_err(|e| format!("knob disconnected: {e}"))?;
+            if got.is_empty() {
+                if Instant::now() >= deadline {
+                    return Err("the knob stopped answering".into());
+                }
+                std::thread::sleep(Duration::from_millis(2));
             }
+            self.pending.extend(got);
         }
     }
 
@@ -150,40 +173,48 @@ impl<T: Read + Write> Session<T> {
         t: FwTimeouts,
         progress: &mut dyn FnMut(usize, usize),
         other: &mut dyn FnMut(Msg),
-    ) -> Result<(), String> {
+    ) -> Result<(), FwFail> {
         let total = image.len();
-        let io = |e: io::Error| format!("knob disconnected: {e}");
+        let io = |e: io::Error| FwFail::new(format!("knob disconnected: {e}"));
         self.send(&Msg::FwBegin { size: total as u32, crc32: crate::fw::crc32(image), version: version.into() }).map_err(io)?;
         let mut want = self.expect_ok(t.begin, other)?;
-        let mut stuck = 0;
+        // The furthest the knob has got; answers that don't pass it are retries, and only a few in a row are allowed
+        let mut high = want;
+        let mut retries = 0;
         while (want as usize) < total {
             let at = want as usize;
             let end = (at + FW_CHUNK).min(total);
             self.send(&Msg::FwData { offset: want, data: image[at..end].to_vec() }).map_err(io)?;
             let next = self.expect_ok(t.chunk, other)?;
             if next as usize > total {
-                return Err(format!("the knob asked for offset {next}, past the end"));
+                return Err(FwFail::new(format!("the knob asked for offset {next}, past the end")));
             }
-            // A knob that keeps asking for the same or an earlier spot is not making progress
-            stuck = if next <= want { stuck + 1 } else { 0 };
-            if stuck >= 3 {
-                return Err(format!("the knob keeps asking for offset {next}"));
+            if next > high {
+                high = next;
+                retries = 0;
+            } else {
+                retries += 1;
+                if retries >= 3 {
+                    return Err(FwFail::new(format!("the knob keeps asking for offset {next}")));
+                }
             }
             want = next;
-            progress(want as usize, total);
+            progress(high as usize, total);
         }
-        self.send(&Msg::FwEnd).map_err(io)?;
-        match self.fw_status(t.end, other)? {
-            (FW_DONE, _, _) => Ok(()),
-            (_, _, text) => Err(if text.is_empty() { "the knob rejected the update".into() } else { format!("the knob says: {text}") }),
+        self.send(&Msg::FwEnd).map_err(|e| FwFail { text: format!("knob disconnected: {e}"), unconfirmed: true })?;
+        match self.fw_status(t.end, other) {
+            Ok((FW_DONE, _, _)) => Ok(()),
+            Ok((_, _, text)) => Err(FwFail::new(if text.is_empty() { "the knob rejected the update".into() } else { format!("the knob says: {text}") })),
+            // It may have switched slots and rebooted before its answer got out
+            Err(text) => Err(FwFail { text, unconfirmed: true }),
         }
     }
 
     /// The next FW_STATUS must be FW_OK; returns the offset it asks for
-    fn expect_ok(&mut self, wait: Duration, other: &mut dyn FnMut(Msg)) -> Result<u32, String> {
-        match self.fw_status(wait, other)? {
+    fn expect_ok(&mut self, wait: Duration, other: &mut dyn FnMut(Msg)) -> Result<u32, FwFail> {
+        match self.fw_status(wait, other).map_err(FwFail::new)? {
             (FW_OK, offset, _) => Ok(offset),
-            (_, _, text) => Err(if text.is_empty() { "the knob stopped the update".into() } else { format!("the knob says: {text}") }),
+            (_, _, text) => Err(FwFail::new(if text.is_empty() { "the knob stopped the update".into() } else { format!("the knob says: {text}") })),
         }
     }
 }
@@ -302,7 +333,7 @@ mod tests {
         assert_eq!(hex(&encode(&Msg::SetMic { muted: true })), "033301020100");
         assert_eq!(hex(&encode(&Msg::SetMonitor { bright: 70 })), "033401024600");
         assert_eq!(hex(&encode(&Msg::SetAppVolume { id: 0x0A0B_0C0D, vol: 40, muted: false })), "033206060d0c0b0a280100");
-        assert_eq!(hex(&encode(&Msg::Turn { steps: -1 })), "03350102ff00");
+        assert_eq!(hex(&encode(&Msg::Turn { mode: crate::protocol::MODE_SCROLL, steps: -1 })), "0335020301ff00");
         assert_eq!(hex(&encode(&Msg::FwStatus { state: FW_OK, offset: 2048, text: String::new() })), "0343060101020801010100");
     }
 
@@ -333,13 +364,19 @@ mod tests {
         resend_at: Option<u32>,
         /// Ask for this offset forever (a stuck knob)
         stuck_at: Option<u32>,
+        /// Answer alternately with offset 1024 and 0, forever
+        seesaw: bool,
+        /// Send a LOG right after each answer, in the same read
+        log_after: bool,
+        /// Go quiet after FW_END (rebooted before answering)
+        quiet_end: bool,
         silent: bool,
         lamp_during: bool,
         done: bool,
     }
     impl FwKnob {
         fn new() -> Self {
-            FwKnob { dec: Decoder::new(), inp: VecDeque::new(), image: vec![], size: 0, crc: 0, resend_at: None, stuck_at: None, silent: false, lamp_during: false, done: false }
+            FwKnob { dec: Decoder::new(), inp: VecDeque::new(), image: vec![], size: 0, crc: 0, resend_at: None, stuck_at: None, seesaw: false, log_after: false, quiet_end: false, silent: false, lamp_during: false, done: false }
         }
         fn reply(&mut self, m: Msg) {
             self.inp.extend(encode(&m));
@@ -377,7 +414,9 @@ mod tests {
                         if self.lamp_during {
                             self.reply(Msg::Log("still here".into()));
                         }
-                        if let Some(s) = self.stuck_at {
+                        if self.seesaw {
+                            self.ok(if offset == 0 { FW_CHUNK as u32 } else { 0 });
+                        } else if let Some(s) = self.stuck_at {
                             self.ok(s);
                         } else if self.resend_at == Some(offset) {
                             self.resend_at = None;
@@ -387,7 +426,11 @@ mod tests {
                             self.image.extend_from_slice(&data);
                             self.ok(self.image.len() as u32);
                         }
+                        if self.log_after {
+                            self.reply(Msg::Log("after".into()));
+                        }
                     }
+                    Msg::FwEnd if self.quiet_end => {}
                     Msg::FwEnd => {
                         let good = self.image.len() as u32 == self.size && crate::fw::crc32(&self.image) == self.crc;
                         self.done = good;
@@ -408,8 +451,8 @@ mod tests {
         FwTimeouts { begin: Duration::from_millis(50), chunk: Duration::from_millis(50), end: Duration::from_millis(50) }
     }
 
-    fn update(knob: FwKnob, image: &[u8]) -> (Result<(), String>, Session<FwKnob>, Vec<(usize, usize)>, Vec<Msg>) {
-        let mut s = Session { io: knob, dec: Decoder::new(), sent_art: None };
+    fn update(knob: FwKnob, image: &[u8]) -> (Result<(), FwFail>, Session<FwKnob>, Vec<(usize, usize)>, Vec<Msg>) {
+        let mut s = Session { io: knob, dec: Decoder::new(), sent_art: None, pending: VecDeque::new() };
         let (mut prog, mut other) = (vec![], vec![]);
         let r = s.update_firmware(image, "0.4.1", fast(), &mut |a, b| prog.push((a, b)), &mut |m| other.push(m));
         (r, s, prog, other)
@@ -443,10 +486,35 @@ mod tests {
         let img = crate::fw::fake_image("0.4.1", "knob", 2 * FW_CHUNK);
         let mut k = FwKnob::new();
         k.silent = true;
-        assert_eq!(update(k, &img).0, Err("the knob stopped answering".into()));
+        assert_eq!(update(k, &img).0, Err(FwFail::new("the knob stopped answering")));
 
         let mut k = FwKnob::new();
         k.stuck_at = Some(0);
-        assert!(update(k, &img).0.unwrap_err().contains("keeps asking"));
+        assert!(update(k, &img).0.unwrap_err().text.contains("keeps asking"));
+
+        // Alternating answers never get past the first chunk: also stopped
+        let mut k = FwKnob::new();
+        k.seesaw = true;
+        assert!(update(k, &img).0.unwrap_err().text.contains("keeps asking"));
+
+        // No answer to FW_END: the outcome is unknown, not "kept the old firmware"
+        let mut k = FwKnob::new();
+        k.quiet_end = true;
+        let e = update(k, &img).0.unwrap_err();
+        assert!(e.unconfirmed);
+    }
+
+    #[test]
+    fn firmware_update_keeps_messages_read_with_an_answer() {
+        let img = crate::fw::fake_image("0.4.1", "knob", FW_CHUNK + 10);
+        let mut k = FwKnob::new();
+        k.log_after = true;
+        let (r, mut s, _, other) = update(k, &img);
+        assert_eq!(r, Ok(()));
+        // Two chunks, each answer followed by a LOG in the same read: the first went to `other` during the update,
+        // and the one after the last answer is still there for the next poll
+        let mut logs = other.len();
+        logs += s.poll().unwrap().iter().filter(|m| matches!(m, Msg::Log(_))).count();
+        assert_eq!(logs, 2);
     }
 }

@@ -44,7 +44,7 @@ Each message is `type u8 · len u16 LE · payload[len]`, COBS-encoded and follow
 | 0x32 | SET_APP_VOLUME | knob → app | `id u32, vol u8, muted u8` |
 | 0x33 | SET_MIC | knob → app | `muted u8` |
 | 0x34 | SET_MONITOR | knob → app | `bright u8` (0–100) |
-| 0x35 | TURN | knob → app | `steps i8`: detents turned in an app mode, positive = clockwise |
+| 0x35 | TURN | knob → app | `mode u8, steps i8`: detents turned in an app mode (the mode from the last FOCUS), positive = clockwise |
 | 0x40 | FW_BEGIN | app → knob | `size u32, crc32 u32, version str[15]` |
 | 0x41 | FW_DATA | app → knob | `offset u32, data[≤1024]` |
 | 0x42 | FW_END | app → knob | (empty) |
@@ -92,7 +92,8 @@ Each message is `type u8 · len u16 LE · payload[len]`, COBS-encoded and follow
   - SET_MONITOR applies to every monitor that supports DDC/CI. The same 500 ms rule as AUDIO_APPS applies.
 - **FOCUS and TURN:**
   - FOCUS is sent whenever the program in front changes. The mode comes from `appModes` in Detent's settings.
-  - In mode 0 the knob works as the volume knob (HID keys). In modes 1–3 it sends TURN instead. Detent turns that
+  - In mode 0 the knob works as the volume knob (HID keys). In modes 1–3 it sends TURN instead, with the mode it
+    is in. Detent drops a TURN whose mode isn't the current one (sent just before a switch). Detent turns that
     into mouse-wheel input for the window under the pointer:
     - scroll: the plain wheel, with clockwise scrolling down. Fusion 360 and KiCad zoom with this.
     - zoom: Ctrl + wheel, with clockwise zooming in.
@@ -108,6 +109,8 @@ Each message is `type u8 · len u16 LE · payload[len]`, COBS-encoded and follow
   3. After the last chunk the app sends FW_END. The knob checks the size and the CRC-32 (IEEE, as in zlib and
      `esp_rom_crc32_le`), marks the new slot to boot, answers FW_STATUS done and reboots.
   4. FW_STATUS error (with `text`) at any point stops the update; the knob keeps running its old firmware.
+  - If FW_END gets no answer, the result is unknown: the knob may have rebooted into the new firmware before
+    answering. Detent says so instead of reporting a failure; the HELLO after the reconnect shows the version.
   - The image is the app `.bin` from the ESP-IDF build. Detent checks that it is one (magic 0xE9 and an app
     description) and shows its version before sending.
   - While an update runs, the app sends nothing else. After it, the knob reconnects and gets a new snapshot.

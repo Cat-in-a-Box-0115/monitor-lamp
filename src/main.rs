@@ -447,7 +447,10 @@ fn update_firmware() {
             }
         }
         knob::FwEvent::Done => say(format!("updated to {version}. the knob restarts")),
-        knob::FwEvent::Failed(e) => say(format!("update failed: {e}. the knob keeps its old firmware")),
+        knob::FwEvent::Failed { text, unconfirmed: false } => say(format!("update failed: {text}. the knob keeps its old firmware")),
+        knob::FwEvent::Failed { text, unconfirmed: true } => {
+            say(format!("not confirmed ({text}). the version above shows what the knob runs once it reconnects"))
+        }
     });
     if !started {
         say("plug the knob in first".into());

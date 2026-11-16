@@ -96,8 +96,8 @@ pub enum Msg {
     SetMic { muted: bool },
     /// 0x34, knob -> app
     SetMonitor { bright: u8 },
-    /// 0x35, knob -> app: detents turned in an app mode, positive = clockwise
-    Turn { steps: i8 },
+    /// 0x35, knob -> app: detents turned in an app mode (the knob's MODE_*, from the last FOCUS), positive = clockwise
+    Turn { mode: u8, steps: i8 },
     /// 0x40
     FwBegin { size: u32, crc32: u32, version: String },
     /// 0x41
@@ -212,7 +212,8 @@ pub fn encode(m: &Msg) -> Vec<u8> {
             w.u8(*bright);
             0x34
         }
-        Msg::Turn { steps } => {
+        Msg::Turn { mode, steps } => {
+            w.u8(*mode);
             w.u8(*steps as u8);
             0x35
         }
@@ -290,7 +291,7 @@ fn decode(raw: &[u8]) -> Option<Msg> {
         0x32 => Msg::SetAppVolume { id: r.u32()?, vol: r.u8()?, muted: r.u8()? != 0 },
         0x33 => Msg::SetMic { muted: r.u8()? != 0 },
         0x34 => Msg::SetMonitor { bright: r.u8()? },
-        0x35 => Msg::Turn { steps: r.u8()? as i8 },
+        0x35 => Msg::Turn { mode: r.u8()?, steps: r.u8()? as i8 },
         0x40 => Msg::FwBegin { size: r.u32()?, crc32: r.u32()?, version: r.str()? },
         0x41 => Msg::FwData { offset: r.u32()?, data: r.rest() },
         0x42 => Msg::FwEnd,
@@ -480,8 +481,8 @@ mod tests {
             Msg::SetAppVolume { id: 7, vol: 55, muted: false },
             Msg::SetMic { muted: true },
             Msg::SetMonitor { bright: 70 },
-            Msg::Turn { steps: -3 },
-            Msg::Turn { steps: 127 },
+            Msg::Turn { mode: MODE_SCROLL, steps: -3 },
+            Msg::Turn { mode: MODE_ZOOM, steps: 127 },
             Msg::FwBegin { size: 1_400_000, crc32: 0xCBF4_3926, version: "0.4.1".into() },
             Msg::FwData { offset: 4096, data: vec![0xE9, 0, 1, 2, 0] },
             Msg::FwEnd,

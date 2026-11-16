@@ -97,7 +97,7 @@ def main():
     port = serial.Serial(sys.argv[1], 115200, timeout=0.05)
     port.write(frame(0x01, bytes([2]) + struct.pack("<I", 0) + s("fake-0.2")))
     buf, bright, next_state = bytearray(), 30, time.time() + 5
-    apps, mic, monitor, fw = [], False, 50, None
+    apps, mic, monitor, fw, mode = [], False, 50, None, 0
     while True:
         buf += port.read(4096)
         while 0 in buf:
@@ -110,6 +110,7 @@ def main():
                 if ty == 0x15: apps = apps_of(p)
                 if ty == 0x16: mic = p[0] == 1
                 if ty == 0x17 and p[0] != 255: monitor = p[0]
+                if ty == 0x18: mode = p[0]
                 if ty == 0x41:  # FW_DATA: print every 64th chunk only
                     off = struct.unpack("<I", p[:4])[0]
                     if fw is not None and off == len(fw["data"]): fw["data"] += p[4:]
@@ -143,7 +144,7 @@ def main():
             a = apps[0]; vol = max(0, a["vol"] - 10)
             port.write(frame(0x32, struct.pack("<IBB", a["id"], vol, 0))); print(f"-> SET_APP_VOLUME {a['name']} {vol}%")
         elif k in ("t", "T"):
-            port.write(frame(0x35, struct.pack("<b", 1 if k == "t" else -1))); print(f"-> TURN {1 if k == 't' else -1}")
+            port.write(frame(0x35, struct.pack("<Bb", mode, 1 if k == "t" else -1))); print(f"-> TURN {1 if k == 't' else -1} in mode {mode}")
 
 if __name__ == "__main__":
     main()

@@ -59,12 +59,15 @@ fn read() -> Option<u8> {
     out
 }
 
-fn set(pct: u8) {
+/// Sets every DDC monitor; true if at least one took it
+fn set(pct: u8) -> bool {
+    let mut any = false;
     with_monitors(|m| {
         if let Some((_, max)) = get(m) {
-            unsafe { SetVCPFeature(m.hPhysicalMonitor, VCP_BRIGHTNESS, (pct.min(100) as u32 * max + 50) / 100) };
+            any |= unsafe { SetVCPFeature(m.hPhysicalMonitor, VCP_BRIGHTNESS, (pct.min(100) as u32 * max + 50) / 100) } != 0;
         }
     });
+    any
 }
 
 /// Starts the monitor thread; send levels (0-100) to the returned sender. `on_change` gets the level at start,
@@ -82,8 +85,8 @@ pub fn start(on_change: impl Fn(Option<u8>) + Send + 'static) -> Sender<u8> {
                     while let Ok(p) = rx.try_recv() {
                         pct = p;
                     }
-                    set(pct);
-                    if last.is_none() { read() } else { Some(pct) }
+                    // A monitor that refused (some picture modes lock brightness) reports what it really has
+                    if set(pct) { Some(pct) } else { read() }
                 }
                 Err(RecvTimeoutError::Timeout) => read(),
                 Err(RecvTimeoutError::Disconnected) => return,

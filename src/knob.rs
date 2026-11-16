@@ -19,7 +19,33 @@ pub enum Out {
 pub enum FwEvent {
     Progress(usize, usize),
     Done,
-    Failed(String),
+    /// `unconfirmed`: the knob got the whole image but its last answer never came
+    Failed { text: String, unconfirmed: bool },
+}
+
+/// The serial port as the session sees it. Reads return at once when nothing is waiting (the link loop paces
+/// itself); writes may take up to the port's 2 s timeout, enough for a whole cover and short enough to notice a
+/// knob that stopped reading. No FlushFileBuffers: Windows doesn't time it out.
+struct Port(Box<dyn serialport::SerialPort>);
+
+impl std::io::Read for Port {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let waiting = self.0.bytes_to_read().map_err(std::io::Error::from)?;
+        if waiting == 0 {
+            return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "nothing waiting"));
+        }
+        let n = buf.len().min(waiting as usize);
+        self.0.read(&mut buf[..n])
+    }
+}
+
+impl std::io::Write for Port {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.write(buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Throws away queued updates (the snapshot already has the latest state); a queued firmware update is
@@ -27,7 +53,7 @@ pub enum FwEvent {
 fn drain(rx: &Receiver<Out>) {
     while let Ok(o) = rx.try_recv() {
         if let Out::Firmware { report, .. } = o {
-            report(FwEvent::Failed("the knob disconnected".into()));
+            report(FwEvent::Failed { text: "the knob disconnected".into(), unconfirmed: false });
         }
     }
 }
@@ -46,7 +72,7 @@ fn find_port() -> Option<String> {
 fn serve(port: Box<dyn serialport::SerialPort>, snap: &Arc<Mutex<Snapshot>>, rx: &Receiver<Out>, on_msg: &(dyn Fn(Msg) + Send)) -> std::io::Result<()> {
     drain(rx);
     let current = snap.lock().unwrap().clone();
-    let mut s = Session::new(port, &current)?;
+    let mut s = Session::new(Port(port), &current)?;
     loop {
         match rx.recv_timeout(Duration::from_millis(40)) {
             Ok(Out::Msg(m)) => s.send(&m)?,
@@ -54,12 +80,12 @@ fn serve(port: Box<dyn serialport::SerialPort>, snap: &Arc<Mutex<Snapshot>>, rx:
             Ok(Out::Firmware { image, version, report }) => {
                 crate::winutil::log(&format!("knob: updating firmware to {version} ({} bytes)", image.len()));
                 let r = s.update_firmware(&image, &version, FwTimeouts::default(), &mut |a, b| report(FwEvent::Progress(a, b)), &mut |m| on_msg(m));
-                crate::winutil::log(&format!("knob: firmware update {}", r.as_ref().map_or_else(|e| format!("failed: {e}"), |_| "done".into())));
+                crate::winutil::log(&format!("knob: firmware update {}", r.as_ref().map_or_else(|e| format!("failed: {}", e.text), |_| "done".into())));
                 // Either way, start a fresh session: the knob reboots after an update, and after a failure
                 // the link may be mid-frame
                 match r {
                     Ok(()) => report(FwEvent::Done),
-                    Err(e) => report(FwEvent::Failed(e)),
+                    Err(e) => report(FwEvent::Failed { text: e.text, unconfirmed: e.unconfirmed }),
                 }
                 return Ok(());
             }
@@ -82,7 +108,7 @@ pub fn start(
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || loop {
         if let Some(name) = find_port() {
-            match serialport::new(&name, 115_200).timeout(Duration::from_millis(20)).open() {
+            match serialport::new(&name, 115_200).timeout(Duration::from_secs(2)).open() {
                 Ok(mut port) => {
                     // TinyUSB's CDC only sends once the host raises DTR
                     let _ = port.write_data_terminal_ready(true);

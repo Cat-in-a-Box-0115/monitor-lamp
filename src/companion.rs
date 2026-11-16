@@ -189,9 +189,13 @@ fn check_focus() {
     }
 }
 
-/// A knob turn in an app mode becomes wheel input in the program in front
-fn turn(steps: i8) {
+/// A knob turn in an app mode becomes wheel input in the program in front. A turn made in another mode than
+/// the one in front now (sent before the knob heard about the switch) is dropped.
+fn turn(knob_mode: u8, steps: i8) {
     let mode = c().focus.lock().unwrap().mode;
+    if knob_mode != mode {
+        return;
+    }
     if let Some(w) = apps::wheel_for(mode, steps) {
         crate::focus::inject(&w);
     }
@@ -211,7 +215,7 @@ fn from_knob(m: Msg, rest: &(dyn Fn(Msg) + Send)) {
         Msg::SetMonitor { bright } => {
             let _ = co.display.send(bright.min(100));
         }
-        Msg::Turn { steps } => turn(steps),
+        Msg::Turn { mode, steps } => turn(mode, steps),
         m => rest(m),
     }
 }

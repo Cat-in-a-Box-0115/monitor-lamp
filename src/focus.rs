@@ -2,7 +2,7 @@
 
 use detent::apps::Wheel;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_WHEEL,
+    GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_WHEEL,
     MOUSEINPUT, VK_CONTROL,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
@@ -26,7 +26,8 @@ fn key(vk: u16, up: bool) -> INPUT {
     }
 }
 
-/// Sends the wheel input to whatever is under the mouse, holding Ctrl around it for zoom
+/// Sends the wheel input to whatever is under the mouse, holding Ctrl around it for zoom (unless the user
+/// already holds Ctrl: then it's left alone, not released under them)
 pub fn inject(w: &Wheel) {
     let wheel = INPUT {
         r#type: INPUT_MOUSE,
@@ -41,6 +42,7 @@ pub fn inject(w: &Wheel) {
             },
         },
     };
-    let inputs: Vec<INPUT> = if w.ctrl { vec![key(VK_CONTROL, false), wheel, key(VK_CONTROL, true)] } else { vec![wheel] };
+    let held = unsafe { GetAsyncKeyState(VK_CONTROL as i32) } as u16 & 0x8000 != 0;
+    let inputs: Vec<INPUT> = if w.ctrl && !held { vec![key(VK_CONTROL, false), wheel, key(VK_CONTROL, true)] } else { vec![wheel] };
     unsafe { SendInput(inputs.len() as u32, inputs.as_ptr(), std::mem::size_of::<INPUT>() as i32) };
 }
