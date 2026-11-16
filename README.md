@@ -9,6 +9,12 @@ local network, with no cloud involved.
 - **Time of day:** cooler light by day, warmer and dimmer towards bedtime.
 - **Follows your PC:** starts with Windows and turns the lamp on when you sign in; both lights fade
   off at shutdown, sign-out and sleep, and come back on when the PC wakes; optionally follows lock.
+- **Screen brightness:** the monitor's own brightness (DDC/CI), from the tray popup or the knob.
+- **The knob (USB):** Detent sends it now playing, cover art, synced lyrics, PC stats, each app's volume and the
+  mic state, and does what the knob asks: per-app volume, mic mute, screen brightness. In apps listed under
+  `appModes` in the settings (Fusion 360, KiCad, Photoshop and Figma by default) a turn scrolls or zooms instead
+  of changing the volume. **Update firmware** in Settings → Knob sends a new knob firmware over USB.
+  Protocol: [`docs/knob-protocol.md`](docs/knob-protocol.md).
 
 One ~11 MB exe, about 30 MB of memory, no CPU when idle; screen sync uses about 2% of one core.
 
