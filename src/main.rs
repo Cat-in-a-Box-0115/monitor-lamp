@@ -1,9 +1,12 @@
 #![windows_subsystem = "windows"]
 
+mod audio;
 mod capture;
 mod companion;
 mod circadian;
+mod display;
 mod flow;
+mod focus;
 mod hooks;
 mod knob;
 mod lamp;
@@ -323,7 +326,13 @@ fn on_knob(m: detent::protocol::Msg) {
             });
             let _ = tx.lock().unwrap().send(KnobLamp { changed, power, bright, ct, bg_power, bg_rgb });
         }
-        Msg::Hello { version, proto, .. } => log(&format!("knob: firmware {version}, protocol {proto}")),
+        Msg::Hello { version, proto, .. } => {
+            log(&format!("knob: firmware {version}, protocol {proto}"));
+            if proto != detent::protocol::PROTO_VER {
+                log(&format!("knob: protocol {proto} differs from Detent's {}; update one of them", detent::protocol::PROTO_VER));
+            }
+            ui_do(move |ui| ui.set_knob_text(format!("connected over usb · firmware {version}").into()));
+        }
         Msg::Log(text) => log(&format!("knob says: {text}")),
         _ => {}
     }
@@ -401,6 +410,65 @@ fn show_knob(ui: &AppWindow, up: bool) {
     }
 }
 
+fn show_monitor(b: Option<u8>) {
+    ui_do(move |_| {
+        if let Some(p) = app().popup.upgrade() {
+            p.set_has_screen(b.is_some());
+            if let Some(b) = b {
+                p.set_screen(b as f32);
+            }
+        }
+    });
+}
+
+/// "update firmware": pick the knob's app .bin, check it, send it, and show how it goes
+fn update_firmware() {
+    let say = |t: String| ui_do(move |ui| ui.set_fw_result(t.into()));
+    if !companion::connected() {
+        return say("plug the knob in first".into());
+    }
+    let Some(path) = winutil::pick_file("Knob firmware", &[("Knob firmware (*.bin)", "*.bin")]) else { return };
+    let image = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(e) => return say(format!("can't read it: {e}")),
+    };
+    let info = match detent::fw::app_info(&image) {
+        Ok(i) => i,
+        Err(e) => return say(e),
+    };
+    say(format!("sending {} {}…", info.project, info.version));
+    let version = info.version.clone();
+    let last = std::sync::atomic::AtomicUsize::new(usize::MAX);
+    let started = companion::update_firmware(image, info.version, move |e| match e {
+        knob::FwEvent::Progress(a, b) => {
+            let pct = a * 100 / b.max(1);
+            if last.swap(pct, Ordering::Relaxed) != pct {
+                say(format!("sending {version}… {pct}%"));
+            }
+        }
+        knob::FwEvent::Done => say(format!("updated to {version}. the knob restarts")),
+        knob::FwEvent::Failed(e) => say(format!("update failed: {e}. the knob keeps its old firmware")),
+    });
+    if !started {
+        say("plug the knob in first".into());
+    }
+}
+
+/// The settings line that says where a turn scrolls or zooms
+fn modes_text(rules: &[detent::apps::AppRule]) -> String {
+    let mut names: Vec<String> = Vec::new();
+    for r in rules {
+        let n = detent::apps::display_name(&r.exe).to_lowercase();
+        if !names.contains(&n) {
+            names.push(n);
+        }
+    }
+    if names.is_empty() {
+        return "a turn always changes the volume. add appModes in settings.json to scroll or zoom in an app".into();
+    }
+    format!("a turn scrolls or zooms in {} · edit appModes in settings.json, then restart detent", names.join(", "))
+}
+
 fn wire_popup(p: &Popup, ui: &AppWindow) {
     let w = ui.as_weak();
     let pw = p.as_weak();
@@ -452,6 +520,11 @@ fn wire_popup(p: &Popup, ui: &AppWindow) {
     };
     p.on_bg_options(open.clone());
     p.on_open_window(open);
+    p.on_screen_moved(|v| companion::set_monitor(v.round().clamp(0.0, 100.0) as u8));
+
+    ui.on_update_firmware(|| {
+        thread::spawn(update_firmware);
+    });
 
     ui.on_provision(|ssid, pass| {
         let ui = app().ui.unwrap();
@@ -1209,7 +1282,10 @@ fn main() {
     }
     hooks::start(on_hook);
     scheduler();
-    companion::start(|m| ui_do(move |ui| show_media(ui, m)), |up| ui_do(move |ui| show_knob(ui, up)), on_knob);
+    let rules = settings().app_modes;
+    ui.set_modes_text(modes_text(&rules).into());
+    companion::set_rules(rules);
+    companion::start(|m| ui_do(move |ui| show_media(ui, m)), |up| ui_do(move |ui| show_knob(ui, up)), on_knob, show_monitor);
     log(&format!(
         "window and tray created{}; lamp {}",
         if tray.is_some() { "" } else { " (NO tray)" },

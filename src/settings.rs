@@ -24,6 +24,8 @@ pub struct Settings {
     pub flow: Option<Flow>,
     pub sync_smoothing: u32,
     pub circadian: Circadian,
+    /// Programs where a knob turn scrolls or zooms instead of changing the volume
+    pub app_modes: Vec<crate::apps::AppRule>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -63,6 +65,7 @@ impl Default for Settings {
             flow: None,
             sync_smoothing: 3,
             circadian: Circadian::default(),
+            app_modes: crate::apps::default_rules(),
         }
     }
 }
@@ -147,6 +150,10 @@ mod tests {
         std::fs::write(&old, "{\"ip\":\"changed\"}").unwrap();
         assert!(!migrate_from(&old, &new).unwrap());
         assert_eq!(std::fs::read_to_string(&new).unwrap(), "{\"ip\":\"192.168.1.50\"}");
+
+        // An old settings file without appModes gets the default rules
+        let s: Settings = serde_json::from_str("{\"ip\":\"x\"}").unwrap();
+        assert_eq!(s.app_modes, crate::apps::default_rules());
 
         let none_old = d.join("nope.json");
         let none_new = d.join("x").join("settings.json");

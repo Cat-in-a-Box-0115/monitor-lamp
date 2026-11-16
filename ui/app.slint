@@ -396,10 +396,13 @@ export component Popup inherits Window {
     in property <image> art;
     in property <bool> has-art;
     in property <string> knob-text: "no knob";
+    in property <bool> has-screen;
+    in-out property <float> screen: 50;
 
     callback main-toggled(bool);
     callback bg-toggled(bool);
     callback bg-options();
+    callback screen-moved(float);
     callback auto-clicked();
     callback bright-moved(float);
     callback temp-moved(float);
@@ -429,6 +432,22 @@ export component Popup inherits Window {
             auto-clicked => { root.auto-clicked(); }
             bright-moved(v) => { root.bright-moved(v); }
             temp-moved(v) => { root.temp-moved(v); }
+        }
+
+        // The monitor's own brightness, over DDC/CI; hidden when no monitor supports it
+        if root.has-screen: VerticalLayout {
+            Rectangle { height: 12px; }
+            HorizontalLayout {
+                spacing: 12px;
+                Muted { text: "screen"; font-size: 11px; width: 48px; vertical-alignment: center; }
+                Fader {
+                    minimum: 0;
+                    maximum: 100;
+                    value <=> root.screen;
+                    text: round(root.screen) + "%";
+                    moved(v) => { root.screen-moved(v); }
+                }
+            }
         }
 
         if root.has-media: VerticalLayout {
@@ -568,6 +587,8 @@ export component AppWindow inherits Window {
     in property <string> knob-text: "not connected";
     in property <bool> knob-up;
     in-out property <string> provision-result;
+    in property <string> fw-result;
+    in property <string> modes-text;
 
     callback retry();
     callback main-toggled(bool);
@@ -589,6 +610,7 @@ export component AppWindow inherits Window {
     callback open-log();
     callback settings-opened();
     callback provision(string, string); // Wi-Fi name, password
+    callback update-firmware();
 
     if root.view == 0: main-scroll := ScrollView {
         VerticalLayout {
@@ -976,7 +998,18 @@ export component AppWindow inherits Window {
                 }
                 Muted { text: root.provision-result; font-size: 11px; wrap: word-wrap; horizontal-stretch: 1; }
             }
+            Rectangle { height: 12px; }
+            HorizontalLayout {
+                spacing: 12px;
+                Button {
+                    text: "update firmware";
+                    clicked => { root.update-firmware(); }
+                }
+                Muted { text: root.fw-result; font-size: 11px; wrap: word-wrap; horizontal-stretch: 1; }
+            }
             Rectangle { height: 10px; }
+            Muted { text: root.modes-text; font-size: 11px; wrap: word-wrap; }
+            Rectangle { height: 6px; }
             Muted { text: "cpu temperature needs afterburner's cpu sensor on"; font-size: 11px; wrap: word-wrap; }
 
             Rectangle { height: 18px; }

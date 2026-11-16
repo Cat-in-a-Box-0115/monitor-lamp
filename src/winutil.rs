@@ -298,3 +298,49 @@ pub fn utc_offset_minutes() -> i16 {
         (-bias) as i16
     }
 }
+
+// --- processes and files -----------------------------------------------------
+
+/// The full path of a process's program, if Windows lets us see it
+pub fn exe_of(pid: u32) -> Option<String> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION};
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if h.is_null() {
+            return None;
+        }
+        let mut buf = [0u16; 1024];
+        let mut len = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, buf.as_mut_ptr(), &mut len);
+        CloseHandle(h);
+        (ok != 0).then(|| String::from_utf16_lossy(&buf[..len as usize]))
+    }
+}
+
+/// Windows' Open dialog for one file. `filter` is pairs of (label, pattern), e.g. ("Firmware", "*.bin").
+pub fn pick_file(title: &str, filter: &[(&str, &str)]) -> Option<PathBuf> {
+    use windows_sys::Win32::UI::Controls::Dialogs::{GetOpenFileNameW, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR, OFN_PATHMUSTEXIST, OPENFILENAMEW};
+    let mut f: Vec<u16> = Vec::new();
+    for (label, pat) in filter {
+        f.extend(label.encode_utf16().chain([0]));
+        f.extend(pat.encode_utf16().chain([0]));
+    }
+    f.push(0);
+    let title = wide(title);
+    let mut buf = vec![0u16; 1024];
+    unsafe {
+        let mut o: OPENFILENAMEW = std::mem::zeroed();
+        o.lStructSize = std::mem::size_of::<OPENFILENAMEW>() as u32;
+        o.lpstrFilter = f.as_ptr();
+        o.lpstrFile = buf.as_mut_ptr();
+        o.nMaxFile = buf.len() as u32;
+        o.lpstrTitle = title.as_ptr();
+        o.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+        if GetOpenFileNameW(&mut o) == 0 {
+            return None;
+        }
+    }
+    let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    Some(PathBuf::from(String::from_utf16_lossy(&buf[..end])))
+}

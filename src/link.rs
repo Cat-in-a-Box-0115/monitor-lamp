@@ -1,8 +1,9 @@
 //! One connection to the knob over any byte stream (USB serial now, BLE later): HELLO plus a full snapshot on
 //! connect, then live messages. The port scanning and reconnect loop live in the app (`knob.rs`).
 
-use crate::protocol::{cover_chunks, encode, Decoder, Msg, PROTO_VER};
+use crate::protocol::{cover_chunks, encode, Decoder, Msg, FW_CHUNK, FW_DONE, FW_OK, PROTO_VER};
 use std::io::{self, ErrorKind, Read, Write};
+use std::time::{Duration, Instant};
 
 /// Everything the knob should know right now; sent in full on every (re)connect
 #[derive(Clone, Debug)]
@@ -13,6 +14,10 @@ pub struct Snapshot {
     pub cover: Option<(u32, u16, u16, Vec<u8>)>,
     pub lyrics: Msg,
     pub stats: Option<Msg>,
+    pub apps: Option<Msg>,
+    pub mic: Option<Msg>,
+    pub monitor: Option<Msg>,
+    pub focus: Option<Msg>,
 }
 
 /// "Nothing playing", sent explicitly so the knob clears an old song
@@ -22,7 +27,17 @@ pub fn nothing_playing() -> Msg {
 
 impl Default for Snapshot {
     fn default() -> Self {
-        Snapshot { time: None, now: Some(nothing_playing()), cover: None, lyrics: Msg::LyricsNone, stats: None }
+        Snapshot {
+            time: None,
+            now: Some(nothing_playing()),
+            cover: None,
+            lyrics: Msg::LyricsNone,
+            stats: None,
+            apps: None,
+            mic: None,
+            monitor: None,
+            focus: None,
+        }
     }
 }
 
@@ -44,7 +59,7 @@ impl<T: Read + Write> Session<T> {
             s.send_cover(*id, *w, *h, px)?;
         }
         s.send(&snap.lyrics)?;
-        if let Some(m) = &snap.stats {
+        for m in [&snap.stats, &snap.apps, &snap.mic, &snap.monitor, &snap.focus].into_iter().flatten() {
             s.send(m)?;
         }
         Ok(s)
@@ -89,6 +104,87 @@ impl<T: Read + Write> Session<T> {
             }
         }
         Ok(out)
+    }
+}
+
+/// How long the knob may take to answer during an update
+#[derive(Clone, Copy, Debug)]
+pub struct FwTimeouts {
+    /// FW_BEGIN: the knob erases its spare app slot first
+    pub begin: Duration,
+    pub chunk: Duration,
+    /// FW_END: the knob checks the CRC and switches slots
+    pub end: Duration,
+}
+
+impl Default for FwTimeouts {
+    fn default() -> Self {
+        FwTimeouts { begin: Duration::from_secs(20), chunk: Duration::from_secs(3), end: Duration::from_secs(20) }
+    }
+}
+
+impl<T: Read + Write> Session<T> {
+    /// Waits for the knob's next FW_STATUS; any other message goes to `other`
+    fn fw_status(&mut self, wait: Duration, other: &mut dyn FnMut(Msg)) -> Result<(u8, u32, String), String> {
+        let deadline = Instant::now() + wait;
+        loop {
+            for m in self.poll().map_err(|e| format!("knob disconnected: {e}"))? {
+                match m {
+                    Msg::FwStatus { state, offset, text } => return Ok((state, offset, text)),
+                    m => other(m),
+                }
+            }
+            if Instant::now() >= deadline {
+                return Err("the knob stopped answering".into());
+            }
+        }
+    }
+
+    /// Sends a firmware image: FW_BEGIN, then FW_DATA chunks, each acknowledged by FW_STATUS with the next offset
+    /// the knob wants (it may ask for a chunk again), then FW_END. Succeeds once the knob reports FW_DONE; it
+    /// reboots into the new firmware after that, so the session ends. `progress(sent, total)` follows along.
+    pub fn update_firmware(
+        &mut self,
+        image: &[u8],
+        version: &str,
+        t: FwTimeouts,
+        progress: &mut dyn FnMut(usize, usize),
+        other: &mut dyn FnMut(Msg),
+    ) -> Result<(), String> {
+        let total = image.len();
+        let io = |e: io::Error| format!("knob disconnected: {e}");
+        self.send(&Msg::FwBegin { size: total as u32, crc32: crate::fw::crc32(image), version: version.into() }).map_err(io)?;
+        let mut want = self.expect_ok(t.begin, other)?;
+        let mut stuck = 0;
+        while (want as usize) < total {
+            let at = want as usize;
+            let end = (at + FW_CHUNK).min(total);
+            self.send(&Msg::FwData { offset: want, data: image[at..end].to_vec() }).map_err(io)?;
+            let next = self.expect_ok(t.chunk, other)?;
+            if next as usize > total {
+                return Err(format!("the knob asked for offset {next}, past the end"));
+            }
+            // A knob that keeps asking for the same or an earlier spot is not making progress
+            stuck = if next <= want { stuck + 1 } else { 0 };
+            if stuck >= 3 {
+                return Err(format!("the knob keeps asking for offset {next}"));
+            }
+            want = next;
+            progress(want as usize, total);
+        }
+        self.send(&Msg::FwEnd).map_err(io)?;
+        match self.fw_status(t.end, other)? {
+            (FW_DONE, _, _) => Ok(()),
+            (_, _, text) => Err(if text.is_empty() { "the knob rejected the update".into() } else { format!("the knob says: {text}") }),
+        }
+    }
+
+    /// The next FW_STATUS must be FW_OK; returns the offset it asks for
+    fn expect_ok(&mut self, wait: Duration, other: &mut dyn FnMut(Msg)) -> Result<u32, String> {
+        match self.fw_status(wait, other)? {
+            (FW_OK, offset, _) => Ok(offset),
+            (_, _, text) => Err(if text.is_empty() { "the knob stopped the update".into() } else { format!("the knob says: {text}") }),
+        }
     }
 }
 
@@ -144,6 +240,10 @@ mod tests {
             cover: Some((77, 4, 4, vec![9; 32])),
             lyrics: Msg::Lyrics { line_id: 1, prev: "".into(), cur: "paper moons".into(), next: "over a glass garden".into() },
             stats: Some(Msg::PcStats { cpu_pct: Some(5), cpu_c: None, gpu_pct: Some(1), gpu_c: Some(40), ram_pct: Some(50), host: "DESK".into() }),
+            apps: Some(Msg::AudioApps(vec![])),
+            mic: Some(Msg::Mic { muted: Some(false) }),
+            monitor: Some(Msg::Monitor { bright: Some(60) }),
+            focus: Some(Msg::Focus { mode: 0, label: "Chrome".into() }),
         }
     }
 
@@ -157,7 +257,11 @@ mod tests {
         assert!(matches!(got[3], Msg::Cover { art_id: 77, chunk: 0, chunks: 1, .. }));
         assert!(matches!(got[4], Msg::Lyrics { line_id: 1, .. }));
         assert!(matches!(got[5], Msg::PcStats { .. }));
-        assert_eq!(got.len(), 6);
+        assert!(matches!(got[6], Msg::AudioApps(_)));
+        assert!(matches!(got[7], Msg::Mic { .. }));
+        assert!(matches!(got[8], Msg::Monitor { .. }));
+        assert!(matches!(got[9], Msg::Focus { .. }));
+        assert_eq!(got.len(), 10);
 
         // An empty snapshot still tells the knob nothing is playing and there are no lyrics, so a knob
         // that kept an old song on screen across a reconnect clears it
@@ -194,6 +298,12 @@ mod tests {
         // tools/fake_knob.py's LAMP_STATE frame for (changed bright, power 1, bright 50, ct 4000, bg off, rgb 0)
         let st = Msg::LampState { changed: CHANGED_BRIGHT, power: true, bright: 50, ct: 4000, bg_power: false, bg_rgb: 0 };
         assert_eq!(hex(&encode(&st)), "03300a06020132a00f010101010100");
+        // and its key commands and firmware answers
+        assert_eq!(hex(&encode(&Msg::SetMic { muted: true })), "033301020100");
+        assert_eq!(hex(&encode(&Msg::SetMonitor { bright: 70 })), "033401024600");
+        assert_eq!(hex(&encode(&Msg::SetAppVolume { id: 0x0A0B_0C0D, vol: 40, muted: false })), "033206060d0c0b0a280100");
+        assert_eq!(hex(&encode(&Msg::Turn { steps: -1 })), "03350102ff00");
+        assert_eq!(hex(&encode(&Msg::FwStatus { state: FW_OK, offset: 2048, text: String::new() })), "0343060101020801010100");
     }
 
     fn hex(b: &[u8]) -> String {
@@ -210,5 +320,133 @@ mod tests {
         assert_eq!(s.poll().unwrap(), vec![]);
         s.io.inp.extend(&f[3..]);
         assert_eq!(s.poll().unwrap(), vec![st]);
+    }
+
+    /// A knob that runs the firmware-update side of the protocol on what the app writes
+    struct FwKnob {
+        dec: Decoder,
+        inp: VecDeque<u8>,
+        image: Vec<u8>,
+        size: u32,
+        crc: u32,
+        /// Answer the chunk at this offset by asking for it again, once
+        resend_at: Option<u32>,
+        /// Ask for this offset forever (a stuck knob)
+        stuck_at: Option<u32>,
+        silent: bool,
+        lamp_during: bool,
+        done: bool,
+    }
+    impl FwKnob {
+        fn new() -> Self {
+            FwKnob { dec: Decoder::new(), inp: VecDeque::new(), image: vec![], size: 0, crc: 0, resend_at: None, stuck_at: None, silent: false, lamp_during: false, done: false }
+        }
+        fn reply(&mut self, m: Msg) {
+            self.inp.extend(encode(&m));
+        }
+        fn ok(&mut self, offset: u32) {
+            self.reply(Msg::FwStatus { state: FW_OK, offset, text: String::new() });
+        }
+    }
+    impl Read for FwKnob {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.inp.is_empty() {
+                return Err(io::Error::new(ErrorKind::TimedOut, "nothing yet"));
+            }
+            let n = buf.len().min(self.inp.len());
+            for b in buf.iter_mut().take(n) {
+                *b = self.inp.pop_front().unwrap();
+            }
+            Ok(n)
+        }
+    }
+    impl Write for FwKnob {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            for m in self.dec.push(buf) {
+                if self.silent {
+                    continue;
+                }
+                match m {
+                    Msg::FwBegin { size, crc32, .. } => {
+                        self.size = size;
+                        self.crc = crc32;
+                        self.image.clear();
+                        self.ok(0);
+                    }
+                    Msg::FwData { offset, data } => {
+                        if self.lamp_during {
+                            self.reply(Msg::Log("still here".into()));
+                        }
+                        if let Some(s) = self.stuck_at {
+                            self.ok(s);
+                        } else if self.resend_at == Some(offset) {
+                            self.resend_at = None;
+                            self.ok(offset);
+                        } else {
+                            assert_eq!(offset as usize, self.image.len(), "chunks arrive in order");
+                            self.image.extend_from_slice(&data);
+                            self.ok(self.image.len() as u32);
+                        }
+                    }
+                    Msg::FwEnd => {
+                        let good = self.image.len() as u32 == self.size && crate::fw::crc32(&self.image) == self.crc;
+                        self.done = good;
+                        let state = if good { FW_DONE } else { crate::protocol::FW_ERROR };
+                        self.reply(Msg::FwStatus { state, offset: self.image.len() as u32, text: if good { "" } else { "crc mismatch" }.into() });
+                    }
+                    _ => {}
+                }
+            }
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn fast() -> FwTimeouts {
+        FwTimeouts { begin: Duration::from_millis(50), chunk: Duration::from_millis(50), end: Duration::from_millis(50) }
+    }
+
+    fn update(knob: FwKnob, image: &[u8]) -> (Result<(), String>, Session<FwKnob>, Vec<(usize, usize)>, Vec<Msg>) {
+        let mut s = Session { io: knob, dec: Decoder::new(), sent_art: None };
+        let (mut prog, mut other) = (vec![], vec![]);
+        let r = s.update_firmware(image, "0.4.1", fast(), &mut |a, b| prog.push((a, b)), &mut |m| other.push(m));
+        (r, s, prog, other)
+    }
+
+    #[test]
+    fn firmware_update_sends_whole_image() {
+        let img = crate::fw::fake_image("0.4.1", "knob", 3 * FW_CHUNK + 100);
+        let (r, s, prog, _) = update(FwKnob::new(), &img);
+        assert_eq!(r, Ok(()));
+        assert!(s.io.done);
+        assert_eq!(s.io.image, img);
+        assert_eq!(prog.last(), Some(&(img.len(), img.len())));
+        assert_eq!(prog.len(), 4);
+    }
+
+    #[test]
+    fn firmware_update_resends_when_asked_and_passes_other_messages_on() {
+        let img = crate::fw::fake_image("0.4.1", "knob", 2 * FW_CHUNK + 1);
+        let mut k = FwKnob::new();
+        k.resend_at = Some(FW_CHUNK as u32);
+        k.lamp_during = true;
+        let (r, s, _, other) = update(k, &img);
+        assert_eq!(r, Ok(()));
+        assert_eq!(s.io.image, img);
+        assert!(other.iter().all(|m| matches!(m, Msg::Log(_))) && !other.is_empty());
+    }
+
+    #[test]
+    fn firmware_update_fails_cleanly() {
+        let img = crate::fw::fake_image("0.4.1", "knob", 2 * FW_CHUNK);
+        let mut k = FwKnob::new();
+        k.silent = true;
+        assert_eq!(update(k, &img).0, Err("the knob stopped answering".into()));
+
+        let mut k = FwKnob::new();
+        k.stuck_at = Some(0);
+        assert!(update(k, &img).0.unwrap_err().contains("keeps asking"));
     }
 }

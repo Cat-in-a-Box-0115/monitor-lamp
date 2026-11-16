@@ -1,7 +1,7 @@
 // The knob over USB serial: finds it by VID/PID, keeps one session open, reconnects when it's replugged.
 // Message rules are in docs/knob-protocol.md; the session logic is in detent::link (tested on any OS).
 
-use detent::link::{Session, Snapshot};
+use detent::link::{FwTimeouts, Session, Snapshot};
 use detent::protocol::{Msg, PID, VID};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
@@ -12,6 +12,24 @@ pub enum Out {
     Msg(Msg),
     /// (art_id, w, h, RGB565): sent only if the knob doesn't have this cover yet
     Cover(u32, u16, u16, Vec<u8>),
+    /// A new knob firmware image and its version; `report` follows the update
+    Firmware { image: Vec<u8>, version: String, report: Box<dyn Fn(FwEvent) + Send> },
+}
+
+pub enum FwEvent {
+    Progress(usize, usize),
+    Done,
+    Failed(String),
+}
+
+/// Throws away queued updates (the snapshot already has the latest state); a queued firmware update is
+/// answered as failed rather than dropped silently
+fn drain(rx: &Receiver<Out>) {
+    while let Ok(o) = rx.try_recv() {
+        if let Out::Firmware { report, .. } = o {
+            report(FwEvent::Failed("the knob disconnected".into()));
+        }
+    }
 }
 
 fn find_port() -> Option<String> {
@@ -26,14 +44,25 @@ fn find_port() -> Option<String> {
 }
 
 fn serve(port: Box<dyn serialport::SerialPort>, snap: &Arc<Mutex<Snapshot>>, rx: &Receiver<Out>, on_msg: &(dyn Fn(Msg) + Send)) -> std::io::Result<()> {
-    // Drop anything queued while disconnected: the snapshot already has the latest state
-    while rx.try_recv().is_ok() {}
+    drain(rx);
     let current = snap.lock().unwrap().clone();
     let mut s = Session::new(port, &current)?;
     loop {
         match rx.recv_timeout(Duration::from_millis(40)) {
             Ok(Out::Msg(m)) => s.send(&m)?,
             Ok(Out::Cover(id, w, h, px)) => s.send_cover(id, w, h, &px)?,
+            Ok(Out::Firmware { image, version, report }) => {
+                crate::winutil::log(&format!("knob: updating firmware to {version} ({} bytes)", image.len()));
+                let r = s.update_firmware(&image, &version, FwTimeouts::default(), &mut |a, b| report(FwEvent::Progress(a, b)), &mut |m| on_msg(m));
+                crate::winutil::log(&format!("knob: firmware update {}", r.as_ref().map_or_else(|e| format!("failed: {e}"), |_| "done".into())));
+                // Either way, start a fresh session: the knob reboots after an update, and after a failure
+                // the link may be mid-frame
+                match r {
+                    Ok(()) => report(FwEvent::Done),
+                    Err(e) => report(FwEvent::Failed(e)),
+                }
+                return Ok(());
+            }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return Ok(()),
         }
@@ -68,7 +97,7 @@ pub fn start(
         }
         // Not connected: forget queued updates and look again in 2 s
         thread::sleep(Duration::from_secs(2));
-        while rx.try_recv().is_ok() {}
+        drain(&rx);
     });
     tx
 }

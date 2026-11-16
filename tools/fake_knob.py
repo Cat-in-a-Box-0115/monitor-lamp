@@ -7,9 +7,13 @@ DETENT_KNOB_PORT=COMx (the other end of the pair) to point it at the port direct
   python tools/fake_knob.py COM11
 
 Prints every message Detent sends, and sends LAMP_STATE with a new brightness every 5 s, the way the
-real knob reports a change it made to the lamp.
+real knob reports a change it made to the lamp. It also answers a firmware update like the real knob
+(the received image is saved as fake_knob_fw.bin), and takes keys in its console window:
+
+  m  mute / unmute the mic           [ ]  monitor brightness -10 / +10
+  v  first app's volume -10          t T  turn +1 / -1 (scrolls or zooms in an app mode)
 """
-import struct, sys, time
+import struct, sys, time, zlib
 
 
 def cobs_encode(data: bytes) -> bytes:
@@ -62,13 +66,38 @@ def describe(ty: int, p: bytes) -> str:
         v = ["-" if x == 255 else x for x in p[:5]]; return f"PC_STATS cpu {v[0]}% {v[1]}C  gpu {v[2]}% {v[3]}C  ram {v[4]}%  {strs(p[5:], 1)[0][0]}"
     if ty == 0x20: (ssid, _pw, ip, _tok), _ = strs(p, 4); return f"PROVISION ssid={ssid} lamp={ip} (password and token hidden)"
     if ty == 0x21: u, tz = struct.unpack("<Ih", p); return f"TIME {time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(u + tz * 60))}"
+    if ty == 0x15: return "AUDIO_APPS " + (", ".join(f"{a['name']} {a['vol']}%{' muted' if a['muted'] else ''}" for a in apps_of(p)) or "(none)")
+    if ty == 0x16: return "MIC " + {0: "on", 1: "muted"}.get(p[0], "none")
+    if ty == 0x17: return "MONITOR " + ("no ddc" if p[0] == 255 else f"{p[0]}%")
+    if ty == 0x18: return f"FOCUS mode {['volume', 'scroll', 'zoom', 'sideways'][p[0]] if p[0] < 4 else p[0]}  {strs(p[1:], 1)[0][0]}"
+    if ty == 0x40: size, crc = struct.unpack("<II", p[:8]); return f"FW_BEGIN {size} bytes crc {crc:08x} version {strs(p[8:], 1)[0][0]}"
+    if ty == 0x42: return "FW_END"
     return f"type {ty:#04x}, {len(p)} bytes"
+
+def apps_of(p: bytes):
+    out, n, p = [], p[0], p[1:]
+    for _ in range(n):
+        i, vol, muted = struct.unpack("<IBB", p[:6]); (name,), p = strs(p[6:], 1)
+        out.append({"id": i, "vol": vol, "muted": bool(muted), "name": name})
+    return out
+
+def fw_status(state: int, offset: int, text: str = "") -> bytes:
+    return frame(0x43, struct.pack("<BI", state, offset) + s(text))
+
+def key():
+    """A key pressed in this console, if any (Windows only)"""
+    try:
+        import msvcrt
+    except ImportError:
+        return None
+    return msvcrt.getwch() if msvcrt.kbhit() else None
 
 def main():
     import serial  # pyserial
     port = serial.Serial(sys.argv[1], 115200, timeout=0.05)
-    port.write(frame(0x01, bytes([1]) + struct.pack("<I", 0) + s("fake-0.1")))
+    port.write(frame(0x01, bytes([2]) + struct.pack("<I", 0) + s("fake-0.2")))
     buf, bright, next_state = bytearray(), 30, time.time() + 5
+    apps, mic, monitor, fw = [], False, 50, None
     while True:
         buf += port.read(4096)
         while 0 in buf:
@@ -77,8 +106,26 @@ def main():
             try:
                 d = cobs_decode(raw); ty, n = d[0], struct.unpack("<H", d[1:3])[0]
                 if n != len(d) - 3: print("bad length"); continue
-                if ty != 0x11 or d[3 + 6] == 0:  # print the first chunk of each cover only
-                    print(describe(ty, d[3:]))
+                p = d[3:]
+                if ty == 0x15: apps = apps_of(p)
+                if ty == 0x16: mic = p[0] == 1
+                if ty == 0x17 and p[0] != 255: monitor = p[0]
+                if ty == 0x41:  # FW_DATA: print every 64th chunk only
+                    off = struct.unpack("<I", p[:4])[0]
+                    if fw is not None and off == len(fw["data"]): fw["data"] += p[4:]
+                    if off // 1024 % 64 == 0: print(f"FW_DATA at {off}")
+                    port.write(fw_status(0, len(fw["data"]) if fw else 0))
+                    continue
+                if ty == 0x40:
+                    size, crc = struct.unpack("<II", p[:8]); fw = {"size": size, "crc": crc, "data": bytearray()}
+                    port.write(fw_status(0, 0))
+                if ty == 0x42 and fw is not None:
+                    good = len(fw["data"]) == fw["size"] and zlib.crc32(fw["data"]) == fw["crc"]
+                    open("fake_knob_fw.bin", "wb").write(fw["data"])
+                    port.write(fw_status(2 if good else 1, len(fw["data"]), "" if good else "crc mismatch"))
+                    print("firmware received:", "ok, saved as fake_knob_fw.bin" if good else "CRC MISMATCH")
+                if ty != 0x11 or p[8:10] == b"\0\0":  # print the first chunk of each cover only
+                    print(describe(ty, p))
             except Exception as e:
                 print("bad frame:", e)
         if time.time() > next_state:
@@ -86,6 +133,17 @@ def main():
             port.write(frame(0x30, struct.pack("<BBBHBI", 0x02, 1, bright, 4000, 0, 0)))  # changed = brightness
             print(f"-> LAMP_STATE bright {bright}%")
             next_state = time.time() + 5
+        k = key()
+        if k == "m":
+            port.write(frame(0x33, bytes([0 if mic else 1]))); print(f"-> SET_MIC {'on' if mic else 'muted'}")
+        elif k in ("[", "]"):
+            monitor = max(0, min(100, monitor + (10 if k == "]" else -10)))
+            port.write(frame(0x34, bytes([monitor]))); print(f"-> SET_MONITOR {monitor}%")
+        elif k == "v" and apps:
+            a = apps[0]; vol = max(0, a["vol"] - 10)
+            port.write(frame(0x32, struct.pack("<IBB", a["id"], vol, 0))); print(f"-> SET_APP_VOLUME {a['name']} {vol}%")
+        elif k in ("t", "T"):
+            port.write(frame(0x35, struct.pack("<b", 1 if k == "t" else -1))); print(f"-> TURN {1 if k == 't' else -1}")
 
 if __name__ == "__main__":
     main()

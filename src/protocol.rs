@@ -1,11 +1,11 @@
-//! The knob link, protocol v1. Spec: docs/knob-protocol.md (shared with the knob firmware).
+//! The knob link, protocol v2. Spec: docs/knob-protocol.md (shared with the knob firmware).
 //!
 //! A frame is `type u8, len u16 LE, payload`, COBS-encoded and ended by 0x00. The same frames go over
 //! USB serial (CDC) and, later, BLE.
 
 pub const VID: u16 = 0x303A;
 pub const PID: u16 = 0x8D01;
-pub const PROTO_VER: u8 = 1;
+pub const PROTO_VER: u8 = 2;
 
 /// LAMP_STATE `changed` bits: which values the knob just changed
 pub const CHANGED_POWER: u8 = 1;
@@ -29,6 +29,33 @@ pub const MAX_TOKEN: usize = 32;
 pub const MAX_HOST: usize = 23;
 pub const MAX_VERSION: usize = 15;
 pub const MAX_LOG: usize = 200;
+pub const MAX_APP: usize = 23;
+pub const MAX_FW_TEXT: usize = 63;
+
+/// AUDIO_APPS carries at most this many apps
+pub const MAX_APPS: usize = 8;
+/// Bytes per FW_DATA chunk
+pub const FW_CHUNK: usize = 1024;
+
+/// FOCUS modes: what a knob turn does in the app in front
+pub const MODE_VOLUME: u8 = 0;
+pub const MODE_SCROLL: u8 = 1;
+pub const MODE_ZOOM: u8 = 2;
+pub const MODE_SIDEWAYS: u8 = 3;
+
+/// FW_STATUS states
+pub const FW_OK: u8 = 0;
+pub const FW_ERROR: u8 = 1;
+pub const FW_DONE: u8 = 2;
+
+/// One app playing sound, in AUDIO_APPS
+#[derive(Clone, Debug, PartialEq)]
+pub struct AudioApp {
+    pub id: u32,
+    pub vol: u8,
+    pub muted: bool,
+    pub name: String,
+}
 
 /// Largest payload a decoder accepts (a cover chunk plus its header)
 const MAX_PAYLOAD: usize = COVER_CHUNK + 32;
@@ -55,6 +82,30 @@ pub enum Msg {
     LampState { changed: u8, power: bool, bright: u8, ct: u16, bg_power: bool, bg_rgb: u32 },
     /// 0x31, knob -> app
     Log(String),
+    /// 0x15, at most MAX_APPS
+    AudioApps(Vec<AudioApp>),
+    /// 0x16, None = no microphone
+    Mic { muted: Option<bool> },
+    /// 0x17, None = no monitor that takes brightness over DDC/CI
+    Monitor { bright: Option<u8> },
+    /// 0x18, the app in front and what a turn does there (MODE_*)
+    Focus { mode: u8, label: String },
+    /// 0x32, knob -> app
+    SetAppVolume { id: u32, vol: u8, muted: bool },
+    /// 0x33, knob -> app
+    SetMic { muted: bool },
+    /// 0x34, knob -> app
+    SetMonitor { bright: u8 },
+    /// 0x35, knob -> app: detents turned in an app mode, positive = clockwise
+    Turn { steps: i8 },
+    /// 0x40
+    FwBegin { size: u32, crc32: u32, version: String },
+    /// 0x41
+    FwData { offset: u32, data: Vec<u8> },
+    /// 0x42
+    FwEnd,
+    /// 0x43, knob -> app
+    FwStatus { state: u8, offset: u32, text: String },
 }
 
 pub fn encode(m: &Msg) -> Vec<u8> {
@@ -123,6 +174,66 @@ pub fn encode(m: &Msg) -> Vec<u8> {
             w.str(text, MAX_LOG);
             0x31
         }
+        Msg::AudioApps(apps) => {
+            let apps = &apps[..apps.len().min(MAX_APPS)];
+            w.u8(apps.len() as u8);
+            for a in apps {
+                w.u32(a.id);
+                w.u8(a.vol.min(100));
+                w.u8(a.muted as u8);
+                w.str(&a.name, MAX_APP);
+            }
+            0x15
+        }
+        Msg::Mic { muted } => {
+            w.u8(muted.map(|m| m as u8).unwrap_or(0xFF));
+            0x16
+        }
+        Msg::Monitor { bright } => {
+            w.u8(bright.map(|b| b.min(100)).unwrap_or(0xFF));
+            0x17
+        }
+        Msg::Focus { mode, label } => {
+            w.u8(*mode);
+            w.str(label, MAX_APP);
+            0x18
+        }
+        Msg::SetAppVolume { id, vol, muted } => {
+            w.u32(*id);
+            w.u8(*vol);
+            w.u8(*muted as u8);
+            0x32
+        }
+        Msg::SetMic { muted } => {
+            w.u8(*muted as u8);
+            0x33
+        }
+        Msg::SetMonitor { bright } => {
+            w.u8(*bright);
+            0x34
+        }
+        Msg::Turn { steps } => {
+            w.u8(*steps as u8);
+            0x35
+        }
+        Msg::FwBegin { size, crc32, version } => {
+            w.u32(*size);
+            w.u32(*crc32);
+            w.str(version, MAX_VERSION);
+            0x40
+        }
+        Msg::FwData { offset, data } => {
+            w.u32(*offset);
+            w.0.extend_from_slice(&data[..data.len().min(FW_CHUNK)]);
+            0x41
+        }
+        Msg::FwEnd => 0x42,
+        Msg::FwStatus { state, offset, text } => {
+            w.u8(*state);
+            w.u32(*offset);
+            w.str(text, MAX_FW_TEXT);
+            0x43
+        }
     };
     let len = w.0.len() as u16;
     let mut raw = Vec::with_capacity(w.0.len() + 3);
@@ -162,6 +273,28 @@ fn decode(raw: &[u8]) -> Option<Msg> {
         0x21 => Msg::Time { unix: r.u32()?, tz_min: r.u16()? as i16 },
         0x30 => Msg::LampState { changed: r.u8()?, power: r.u8()? != 0, bright: r.u8()?, ct: r.u16()?, bg_power: r.u8()? != 0, bg_rgb: r.u32()? },
         0x31 => Msg::Log(r.str()?),
+        0x15 => {
+            let n = r.u8()? as usize;
+            if n > MAX_APPS {
+                return None;
+            }
+            let mut apps = Vec::with_capacity(n);
+            for _ in 0..n {
+                apps.push(AudioApp { id: r.u32()?, vol: r.u8()?, muted: r.u8()? != 0, name: r.str()? });
+            }
+            Msg::AudioApps(apps)
+        }
+        0x16 => Msg::Mic { muted: match r.u8()? { 0xFF => None, b => Some(b != 0) } },
+        0x17 => Msg::Monitor { bright: match r.u8()? { 0xFF => None, b => Some(b) } },
+        0x18 => Msg::Focus { mode: r.u8()?, label: r.str()? },
+        0x32 => Msg::SetAppVolume { id: r.u32()?, vol: r.u8()?, muted: r.u8()? != 0 },
+        0x33 => Msg::SetMic { muted: r.u8()? != 0 },
+        0x34 => Msg::SetMonitor { bright: r.u8()? },
+        0x35 => Msg::Turn { steps: r.u8()? as i8 },
+        0x40 => Msg::FwBegin { size: r.u32()?, crc32: r.u32()?, version: r.str()? },
+        0x41 => Msg::FwData { offset: r.u32()?, data: r.rest() },
+        0x42 => Msg::FwEnd,
+        0x43 => Msg::FwStatus { state: r.u8()?, offset: r.u32()?, text: r.str()? },
         _ => return None,
     };
     r.0.is_empty().then_some(m)
@@ -333,6 +466,26 @@ mod tests {
             Msg::Time { unix: 1_794_758_659, tz_min: -480 },
             Msg::LampState { changed: CHANGED_BRIGHT | CHANGED_CT, power: true, bright: 70, ct: 4000, bg_power: false, bg_rgb: 0xFFB340 },
             Msg::Log("hello from the knob".into()),
+            Msg::AudioApps(vec![
+                AudioApp { id: 7, vol: 80, muted: false, name: "Spotify".into() },
+                AudioApp { id: 0xFFFF_0001, vol: 35, muted: true, name: "Discord".into() },
+            ]),
+            Msg::AudioApps(vec![]),
+            Msg::Mic { muted: Some(true) },
+            Msg::Mic { muted: Some(false) },
+            Msg::Mic { muted: None },
+            Msg::Monitor { bright: Some(0) },
+            Msg::Monitor { bright: None },
+            Msg::Focus { mode: MODE_ZOOM, label: "Fusion 360".into() },
+            Msg::SetAppVolume { id: 7, vol: 55, muted: false },
+            Msg::SetMic { muted: true },
+            Msg::SetMonitor { bright: 70 },
+            Msg::Turn { steps: -3 },
+            Msg::Turn { steps: 127 },
+            Msg::FwBegin { size: 1_400_000, crc32: 0xCBF4_3926, version: "0.4.1".into() },
+            Msg::FwData { offset: 4096, data: vec![0xE9, 0, 1, 2, 0] },
+            Msg::FwEnd,
+            Msg::FwStatus { state: FW_ERROR, offset: 2048, text: "flash write failed".into() },
         ]
     }
 
@@ -395,6 +548,21 @@ mod tests {
         assert!(title.len() <= MAX_TITLE);
         assert_eq!(title.len(), 39); // 13 three-byte chars
         assert!(title.chars().all(|c| c == '夜'));
+    }
+
+    #[test]
+    fn audio_apps_capped_and_checked() {
+        let many: Vec<AudioApp> = (0..12).map(|i| AudioApp { id: i, vol: 200, muted: false, name: format!("app{i}") }).collect();
+        let got = Decoder::new().push(&encode(&Msg::AudioApps(many)));
+        let Msg::AudioApps(apps) = &got[0] else { panic!() };
+        assert_eq!(apps.len(), MAX_APPS);
+        assert_eq!(apps[0].vol, 100, "volume clamped to 100");
+
+        // A count above MAX_APPS from the other side is rejected, not trusted
+        let raw = [0x15, 1, 0, 9u8];
+        let mut frame = cobs_encode(&raw);
+        frame.push(0);
+        assert!(Decoder::new().push(&frame).is_empty());
     }
 
     #[test]
