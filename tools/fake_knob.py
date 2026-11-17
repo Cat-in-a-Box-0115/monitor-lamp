@@ -6,6 +6,11 @@ DETENT_KNOB_PORT=COMx (the other end of the pair) to point it at the port direct
 
   python tools/fake_knob.py COM11
 
+Without a COM pair (com0com's driver is refused on Windows 11 with Secure Boot on), use TCP instead:
+start Detent with DETENT_KNOB_PORT=tcp:127.0.0.1:5577 and run
+
+  python tools/fake_knob.py tcp:5577
+
 Prints every message Detent sends, and sends LAMP_STATE with a new brightness every 5 s, the way the
 real knob reports a change it made to the lamp. It also answers a firmware update like the real knob
 (the received image is saved as fake_knob_fw.bin), and takes keys in its console window:
@@ -92,9 +97,37 @@ def key():
         return None
     return msvcrt.getwch() if msvcrt.kbhit() else None
 
+class TcpPort:
+    """Listens on 127.0.0.1:<port> and waits for Detent to connect; reads and writes like pyserial"""
+    def __init__(self, tcp_port: int):
+        import socket
+        srv = socket.socket(); srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", tcp_port)); srv.listen(1)
+        print(f"waiting for Detent on tcp port {tcp_port}...")
+        self.sock, _ = srv.accept(); srv.close()
+        self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        self.sock.settimeout(0.05)
+        print("Detent connected")
+
+    def read(self, n: int) -> bytes:
+        import socket
+        try:
+            data = self.sock.recv(n)
+        except socket.timeout:
+            return b""
+        if not data:
+            sys.exit("Detent closed the connection")
+        return data
+
+    def write(self, data: bytes):
+        self.sock.sendall(data)
+
 def main():
-    import serial  # pyserial
-    port = serial.Serial(sys.argv[1], 115200, timeout=0.05)
+    if sys.argv[1].startswith("tcp:"):
+        port = TcpPort(int(sys.argv[1][4:]))
+    else:
+        import serial  # pyserial
+        port = serial.Serial(sys.argv[1], 115200, timeout=0.05)
     port.write(frame(0x01, bytes([2]) + struct.pack("<I", 0) + s("fake-0.2")))
     buf, bright, next_state = bytearray(), 30, time.time() + 5
     apps, mic, monitor, fw, mode = [], False, 50, None, 0

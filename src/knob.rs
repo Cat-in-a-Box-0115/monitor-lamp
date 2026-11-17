@@ -48,6 +48,37 @@ impl std::io::Write for Port {
     }
 }
 
+/// Test-only link to tools/fake_knob.py over TCP (DETENT_KNOB_PORT=tcp:host:port), for PCs where a virtual COM
+/// pair can't be installed (com0com's driver is refused with Secure Boot on). Same protocol; the knob's end
+/// listens. Reads time out after 1 ms (the link loop paces itself); the knob closing the socket is a disconnect.
+struct Tcp(std::net::TcpStream);
+
+impl std::io::Read for Tcp {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self.0.read(buf) {
+            Ok(0) => Err(std::io::Error::new(std::io::ErrorKind::ConnectionAborted, "the knob closed the connection")),
+            r => r,
+        }
+    }
+}
+
+impl std::io::Write for Tcp {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.write(buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush()
+    }
+}
+
+fn open_tcp(addr: &str) -> std::io::Result<Tcp> {
+    let s = std::net::TcpStream::connect(addr)?;
+    s.set_nodelay(true)?;
+    s.set_read_timeout(Some(Duration::from_millis(1)))?;
+    s.set_write_timeout(Some(Duration::from_secs(2)))?;
+    Ok(Tcp(s))
+}
+
 /// Throws away queued updates (the snapshot already has the latest state); a queued firmware update is
 /// answered as failed rather than dropped silently
 fn drain(rx: &Receiver<Out>) {
@@ -59,7 +90,7 @@ fn drain(rx: &Receiver<Out>) {
 }
 
 fn find_port() -> Option<String> {
-    // For testing with a virtual COM port (tools/fake_knob.py), which has no VID/PID
+    // For testing with tools/fake_knob.py: a virtual COM port (which has no VID/PID), or tcp:host:port
     if let Some(p) = std::env::var_os("DETENT_KNOB_PORT") {
         return Some(p.to_string_lossy().into_owned());
     }
@@ -69,10 +100,10 @@ fn find_port() -> Option<String> {
     })
 }
 
-fn serve(port: Box<dyn serialport::SerialPort>, snap: &Arc<Mutex<Snapshot>>, rx: &Receiver<Out>, on_msg: &(dyn Fn(Msg) + Send)) -> std::io::Result<()> {
+fn serve<T: std::io::Read + std::io::Write>(io: T, snap: &Arc<Mutex<Snapshot>>, rx: &Receiver<Out>, on_msg: &(dyn Fn(Msg) + Send)) -> std::io::Result<()> {
     drain(rx);
     let current = snap.lock().unwrap().clone();
-    let mut s = Session::new(Port(port), &current)?;
+    let mut s = Session::new(io, &current)?;
     loop {
         match rx.recv_timeout(Duration::from_millis(40)) {
             Ok(Out::Msg(m)) => s.send(&m)?,
@@ -107,14 +138,25 @@ pub fn start(
 ) -> Sender<Out> {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || loop {
-        if let Some(name) = find_port() {
+        if let Some(addr) = find_port().as_deref().and_then(|n| n.strip_prefix("tcp:")).map(str::to_owned) {
+            match open_tcp(&addr) {
+                Ok(io) => {
+                    crate::winutil::log(&format!("knob: connected over tcp to {addr} (test mode)"));
+                    on_conn(true);
+                    let r = serve(io, &snap, &rx, &on_msg);
+                    crate::winutil::log(&format!("knob: disconnected ({})", r.err().map(|e| e.to_string()).unwrap_or_default()));
+                    on_conn(false);
+                }
+                Err(e) => crate::winutil::log(&format!("knob: can't connect to {addr}: {e}")),
+            }
+        } else if let Some(name) = find_port() {
             match serialport::new(&name, 115_200).timeout(Duration::from_secs(2)).open() {
                 Ok(mut port) => {
                     // TinyUSB's CDC only sends once the host raises DTR
                     let _ = port.write_data_terminal_ready(true);
                     crate::winutil::log(&format!("knob: connected on {name}"));
                     on_conn(true);
-                    let r = serve(port, &snap, &rx, &on_msg);
+                    let r = serve(Port(port), &snap, &rx, &on_msg);
                     crate::winutil::log(&format!("knob: disconnected ({})", r.err().map(|e| e.to_string()).unwrap_or_default()));
                     on_conn(false);
                 }
